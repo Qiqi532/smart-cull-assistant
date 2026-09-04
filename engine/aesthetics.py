@@ -1,0 +1,189 @@
+# -*- coding: utf-8 -*-
+"""
+aesthetics.py —— 美学评分（GPU 优先，CPU 兼容）
+
+美学算法（v2 升级，替代早期 CLIP 提示词 softmax）：
+    采用 **LAION-Aesthetics 线性美学预测器**（sa_0_4_vit_b_32_linear.pth，
+    基于 sac+logos+ava 人工评分数据集训练，约 17.6 万张标注）：
+        对 openai/clip-vit-base-patch32 的图像嵌入（512 维，已归一化）做一次
+        Linear(512→1)，输出 0-10 美学分，×10 归一为 0-100。
+    该头部与场景分类**复用同一个 CLIP 模型、同一次前向**：
+        在 analyze_batch() 中一次性得到图像嵌入，同时算美学分与场景，
+        头部仅一次 512×1 矩阵乘，几乎零额外开销。
+
+    头部权重文件：models/sa_0_4_vit_b_32_linear.pth（约 3KB，随项目分发）。
+    若文件缺失/加载失败，自动降级回 CLIP 提示词 softmax 打分（功能不中断）。
+
+设备策略：torch.cuda.is_available() 时加载到 GPU，否则 CPU 自动降级。
+
+独立命令行调试：python -m engine.aesthetics <图片路径...>
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+import torch
+from PIL import Image
+
+from . import config, loader
+from .log import get_logger
+
+_log = get_logger("aesthetics")
+
+# 与设计文档一致的提示词（作为美学头缺失时的降级方案），统一来自 engine/config.py
+GOOD = list(config.AESTHETIC_GOOD_PROMPTS)
+BAD = list(config.AESTHETIC_BAD_PROMPTS)
+
+# 场景候选（设计文档 4.4.6），取空格前单词作为场景名
+SCENES = list(config.SCENES)
+SCENE_NAMES = [s.split(" ")[0] for s in SCENES]
+SCENE_CONF_THRESHOLD = config.SCENE_CONF_THRESHOLD   # 低置信度(<0.6)归入"其他"兜底
+
+# 模型名与缓存（模型权重下载到项目内 .hf_cache，不落 C 盘）
+MODEL_NAME = config.CLIP_MODEL_NAME
+
+# LAION-Aesthetics 线性头部（基于 openai/clip-vit-base-patch32 图像嵌入）
+HEAD_PATH = config.AESTHETIC_HEAD_PATH
+
+# 单例
+_model = None
+_proc = None
+_device = None
+_LOADING = False
+_head = None          # (W, b) 已搬到设备
+_HEAD_LOADED = None   # True/False/None(未尝试)
+
+
+def get_device() -> torch.device:
+    global _device
+    if _device is None:
+        _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return _device
+
+
+def get_clip():
+    """懒加载 CLIP 模型（GPU 优先）。返回 (model, processor, device)。"""
+    global _model, _proc, _device, _LOADING
+    if _model is not None:
+        return _model, _proc, get_device()
+    if _LOADING:  # 防重入
+        raise RuntimeError("CLIP 正在加载中")
+    _LOADING = True
+    try:
+        from transformers import CLIPModel, CLIPProcessor
+        _proc = CLIPProcessor.from_pretrained(MODEL_NAME)
+        _model = CLIPModel.from_pretrained(MODEL_NAME)
+        _model.to(get_device())
+        _model.eval()
+    finally:
+        _LOADING = False
+    return _model, _proc, get_device()
+
+
+def get_aesthetic_head():
+    """懒加载 LAION 美学线性头部 (W, b)，失败返回 None（走提示词降级）。"""
+    global _head, _HEAD_LOADED
+    if _HEAD_LOADED is not None:
+        return _head
+    _HEAD_LOADED = False
+    try:
+        if not os.path.exists(HEAD_PATH):
+            _log.warning("未找到美学头部 %s，使用 CLIP 提示词降级", HEAD_PATH)
+            return None
+        sd = torch.load(HEAD_PATH, map_location="cpu", weights_only=True)
+        dev = get_device()
+        _head = (sd["weight"].to(dev), sd["bias"].to(dev))
+        _HEAD_LOADED = True
+        _log.info("LAION 美学头部已加载：%s", HEAD_PATH)
+        return _head
+    except Exception as e:
+        _log.warning("美学头部加载失败：%s，使用 CLIP 提示词降级", e)
+        return None
+
+
+def aesthetic_model_name() -> str:
+    """当前生效的美学模型名（用于分析汇总展示）。"""
+    return "laion-aesthetics(sa_0_4)" if get_aesthetic_head() is not None else "clip-prompt"
+
+
+def _aesthetic_from_embeds(image_embeds) -> list[float]:
+    """用 LAION 线性头把归一化图像嵌入映射为 0-100 美学分。"""
+    W, b = get_aesthetic_head()
+    emb = image_embeds / image_embeds.norm(dim=-1, keepdim=True)
+    pred = emb.float() @ W.t().float() + b.float()     # (N,1)，约 0-10
+    a = (pred[:, 0].cpu().numpy() * 10.0)
+    return [float(min(100.0, max(0.0, v))) for v in a]
+
+
+def _prep_inputs(images, texts):
+    """把 PIL 图列表 + 文本列表整理为模型输入（已搬到目标设备）。"""
+    model, proc, device = get_clip()
+    inputs = proc(text=texts, images=images, return_tensors="pt", padding=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    return inputs
+
+
+def analyze_batch(images) -> list[dict]:
+    """对一批 PIL 图像做一次前向，同时返回美学分与场景分类。
+
+    参数：images 为 PIL.Image 列表（RGB）。
+    返回：每张一个 dict：
+        aesthetic  0-100 美学分（LAION 美学头；缺失时降级 CLIP 提示词）
+        scene      场景名（人像/风光/建筑/街拍/宠物/静物/其他）
+        scene_conf 场景置信度（0-1）
+    """
+    model, proc, device = get_clip()
+    n = len(images)
+    if n == 0:
+        return []
+    all_texts = GOOD + BAD + SCENES
+    n_good, n_bad, n_scene = len(GOOD), len(BAD), len(SCENES)
+    with torch.no_grad():
+        inputs = _prep_inputs(images, all_texts)
+        out = model(**inputs)
+        logits = out.logits_per_image                     # (N, n_text)
+
+        # 美学：优先 LAION 线性头（复用同一次前向的图像嵌入）
+        use_head = get_aesthetic_head() is not None
+        if use_head and getattr(out, "image_embeds", None) is not None:
+            aesthetic = _aesthetic_from_embeds(out.image_embeds)
+        else:
+            ab = logits[:, : n_good + n_bad].softmax(dim=1)   # (N, 2+2) 降级方案
+            aesthetic = (ab[:, :n_good].sum(dim=1) * 100.0).cpu().tolist()
+
+        # 场景：对 SCENES 部分做 softmax
+        sc = logits[:, n_good + n_bad:].softmax(dim=1)    # (N, 7)
+        scores = sc.cpu().tolist()
+    results = []
+    for i in range(n):
+        idx = max(range(n_scene), key=lambda k: scores[i][k])
+        conf = scores[i][idx]
+        scene = SCENE_NAMES[idx]
+        if conf < SCENE_CONF_THRESHOLD:   # 低置信度兜底
+            scene = "其他"
+        results.append({"aesthetic": float(aesthetic[i]), "scene": scene, "scene_conf": float(conf)})
+    return results
+
+
+def aesthetic_score_batch(images) -> list[float]:
+    """仅返回每张的美学分。"""
+    return [r["aesthetic"] for r in analyze_batch(images)]
+
+
+def aesthetic_score(path: str) -> float:
+    """按路径计算美学分。"""
+    img = loader.load_image(path, max_size=512)
+    if img is None:
+        return 0.0
+    return analyze_batch([img])[0]["aesthetic"]
+
+
+# ---------------------------------------------------------------------------
+# 命令行调试入口
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    imgs = [loader.load_image(p, max_size=512) for p in sys.argv[1:]]
+    for p, r in zip(sys.argv[1:], analyze_batch([x for x in imgs if x is not None])):
+        print(f"{os.path.basename(p)}: aesthetic={r['aesthetic']:.1f} "
+              f"scene={r['scene']} conf={r['scene_conf']:.3f}")

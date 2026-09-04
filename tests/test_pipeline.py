@@ -1,0 +1,76 @@
+# -*- coding: utf-8 -*-
+"""pipeline.py 单测：增量分析、断点续跑、场景手动修正持久化（用小型图片，CPU）。"""
+from __future__ import annotations
+
+from engine.pipeline import analyze_directory
+from engine.store import PhotoStore
+
+
+def _run(full_dir, db, **kw):
+    kw.setdefault("use_faces", False)
+    return analyze_directory(str(full_dir[0]), db, **kw)
+
+
+def test_incremental_second_run_no_reanalyze(full_data_dir, tmp_db_path, tmp_path):
+    """第二次运行同目录：mtime 未变 → new_analyzed=0（不重算阶段一/二）。"""
+    r1 = _run(full_data_dir, tmp_db_path)
+    assert r1["new_analyzed"] == 8            # 8 张（连拍A3+B2+模糊+过曝+清晰）
+    r2 = _run(full_data_dir, tmp_db_path)
+    assert r2["total"] == r1["total"]
+    assert r2["new_analyzed"] == 0
+
+
+def test_breakpoint_resume_stage1(full_data_dir, tmp_db_path):
+    """模拟阶段一中断：某张缺失阶段一字段，重启只补算缺失那张。"""
+    r1 = _run(full_data_dir, tmp_db_path)
+    assert r1["new_analyzed"] == 8
+    # 人为破坏：清掉一张的 blur_score（模拟断电时未写入）
+    target = full_data_dir[1]["burstA_0"]
+    with PhotoStore(tmp_db_path) as s:
+        s.update_photo(target, blur_score=None, phash=None)
+    r2 = _run(full_data_dir, tmp_db_path)
+    assert r2["new_analyzed"] == 1            # 只补算缺失的一张
+    with PhotoStore(tmp_db_path) as s:
+        assert s.get_photo(target)["blur_score"] is not None
+
+
+def test_breakpoint_resume_clip(full_data_dir, tmp_db_path):
+    """模拟 CLIP 阶段中断：缺 aesthetic 的照片重启只重跑 CLIP（阶段一不重算）。"""
+    r1 = _run(full_data_dir, tmp_db_path)
+    target = full_data_dir[1]["burstA_1"]
+    with PhotoStore(tmp_db_path) as s:
+        s.update_photo(target, aesthetic=None, scene=None)
+    r2 = _run(full_data_dir, tmp_db_path)
+    assert r2["new_analyzed"] == 0            # 阶段一全部命中
+    with PhotoStore(tmp_db_path) as s:
+        assert s.get_photo(target)["aesthetic"] is not None
+
+
+def test_scene_manual_override_survives_reanalysis(full_data_dir, tmp_db_path):
+    """场景手动修正写入 DB 后，重分析不应被自动识别覆盖。"""
+    r1 = _run(full_data_dir, tmp_db_path)
+    target = full_data_dir[1]["sharp"]
+    with PhotoStore(tmp_db_path) as s:
+        s.set_scene_manual(target, "人像")
+    r2 = _run(full_data_dir, tmp_db_path)
+    with PhotoStore(tmp_db_path) as s:
+        row = s.get_photo(target)
+        assert row["scene"] == "人像"
+        assert row["scene_manual"] == "人像"
+
+
+def test_empty_dir(tmp_path):
+    d = tmp_path / "empty"
+    d.mkdir()
+    r = analyze_directory(str(d), str(tmp_path / "empty.db"))
+    assert r["total"] == 0
+    assert "没有找到" in r["message"]
+
+
+def test_phase_timing_present(full_data_dir, tmp_db_path):
+    """返回分阶段耗时（供 benchmark 使用）。"""
+    r = _run(full_data_dir, tmp_db_path)
+    assert set(r["phase_timing"]) >= {"扫描", "读取元数据", "质量与哈希", "美学与场景",
+                                      "相似聚类", "评分与甄选"}
+    for v in r["phase_timing"].values():
+        assert isinstance(v, float)

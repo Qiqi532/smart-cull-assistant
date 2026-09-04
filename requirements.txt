@@ -1,0 +1,15 @@
+# 光影选片助手（Smart Cull Assistant）Demo 依赖清单
+# 说明：torch/torchvision/opencv/pillow/numpy/pandas/streamlit 由 conda base（Python 3.12.12）提供，
+#       本项目 .venv 通过 --system-site-packages 复用，避免重复下载 GPU 版 torch（约 2.5GB）。
+#       以下为需要在项目 .venv 内补充安装的依赖。
+# 安装方式：
+#   D:\Anaconda\python.exe -m venv --system-site-packages .venv
+#   .\.venv\Scripts\python.exe -m pip install --cache-dir .pip_cache -r requirements.txt
+# 所有下载缓存均在项目内（.pip_cache / .hf_cache / .torch_cache），不落 C 盘。
+
+transformers>=4.40          # CLIP（美学评分 + 场景分类，GPU 推理）+ 闭眼分类器 ViT
+mediapipe>=0.10             # 人脸关键点 / 闭眼 EAR（CPU）
+imagehash>=4.3              # pHash 感知哈希相似度
+pyiqa>=0.1.16               # BRISQUE 无参考质量模型（LIVE 数据集训练）
+# 可选：RAW 专业处理，未安装时不阻塞 JPEG/PNG 主流流程
+rawpy>=0.20
