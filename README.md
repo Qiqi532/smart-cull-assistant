@@ -1,7 +1,7 @@
 # 📷 光影选片助手 Smart Cull Assistant
 
 本地 AI 智能选片工具：**废片剔除 → 相似分组 → 场景自适应评分 → 最佳帧推荐 → 不确定甄选**。
-照片全程本地处理、不上传；GUI 为 Streamlit Web 界面，算法核心在 `engine/`（纯 Python，可独立命令行调试）。
+照片全程本地处理、不上传；GUI 为 **PyQt6 桌面原生窗口**（无浏览器、无参数面板），算法核心在 `engine/`（纯 Python，可独立命令行调试）。
 
 > MVP 落地版（v0.2.0）。设计文档见上级目录 `PRD_智能选片工具/`。
 
@@ -29,7 +29,8 @@
 ## 🏗 架构
 
 ```
-app.py                 Streamlit 四阶段向导（①导入→②自动分析→③人工复核→④确认导出）
+app_qt.py               PyQt6 桌面原生四阶段向导（①导入→②自动分析→③人工复核→④确认导出）
+launcher.py             打包启动器（双击 exe → 直接弹出桌面窗口，无浏览器/黑窗）
 engine/
   config.py            全项目可调参数唯一来源（阈值/权重/模型名/路径，界面与引擎同源）
   log.py               统一日志（控制台 + 文件 smart_cull.log）
@@ -76,9 +77,17 @@ python -m venv --system-site-packages .venv
 start.bat
 
 # 方式 B：命令行
-.\.venv\Scripts\python.exe -m streamlit run app.py
+.\.venv\Scripts\python.exe app_qt.py
 ```
-浏览器打开 **http://localhost:8501**，选择照片文件夹或上传，点「开始分析」。
+双击 exe 或运行脚本后直接弹出**原生桌面窗口**：选择照片文件夹（原生文件夹对话框）→ 点「开始分析」→ 自动进入复核/导出。
+
+### 📦 打包成 exe（Windows 软件形态）
+```bash
+# 一键打包：生成 dist\光影选片助手.exe（约 8.5MB 启动器）
+build_exe.bat
+```
+- 把 `光影选片助手.exe` 复制到项目根目录（与 `app_qt.py` 同级）后，**双击即可启动**：直接弹出桌面原生窗口，无浏览器、无控制台黑窗。
+- 说明：exe 是「启动器」形态——复用项目 .venv 环境（torch/transformers 等大依赖不重复打包，避免 4GB+ 的单文件 exe 与 30s+ 的解压启动）。首次使用前需已按上文完成依赖安装。
 
 ### GPU 与降级说明
 - 有 CUDA GPU：CLIP / BRISQUE 自动用 GPU，速度最快；
@@ -164,7 +173,7 @@ python -m pytest tests -m e2e
 ## ❓ FAQ
 
 **Q：分析很慢？**
-先确认 GPU 生效（应用侧栏显示「✅ GPU 推理」）。无 GPU 时 CPU 全流程约 4-6 分钟/千张属正常。
+先确认窗口底部状态栏显示「✅ GPU 推理」。无 GPU 时 CPU 全流程约 4-6 分钟/千张属正常。
 
 **Q：为什么有的相似组进了「待甄选」？**
 组内 Top1-Top2 综合分差小于 3、或维度互有胜负、或场景置信度低时，算法不替你拍板，

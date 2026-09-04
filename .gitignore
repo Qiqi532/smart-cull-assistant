@@ -43,3 +43,9 @@ _srv_err.log
 *.swp
 .DS_Store
 Thumbs.db
+
+# ---- exe 打包产物（用 build_exe.bat 重新生成）----
+build/
+dist/
+*.spec
+光影选片助手.exe

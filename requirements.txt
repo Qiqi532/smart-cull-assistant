@@ -11,5 +11,6 @@ transformers>=4.40          # CLIP（美学评分 + 场景分类，GPU 推理）
 mediapipe>=0.10             # 人脸关键点 / 闭眼 EAR（CPU）
 imagehash>=4.3              # pHash 感知哈希相似度
 pyiqa>=0.1.16               # BRISQUE 无参考质量模型（LIVE 数据集训练）
+PyQt6>=6.8.0                # 桌面原生界面（app_qt.py，本地窗口、无浏览器）
 # 可选：RAW 专业处理，未安装时不阻塞 JPEG/PNG 主流流程
 rawpy>=0.20
