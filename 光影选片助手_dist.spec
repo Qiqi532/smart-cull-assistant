@@ -37,11 +37,6 @@ _real_third_party = [
     'imagehash',                     # pHash 感知哈希
 ]
 
-# 随包分发的小权重模型（LAION 美学线性头约 3KB，只读，打进 _internal/models）
-import os as _os
-if _os.path.isdir('models'):
-    datas.append(('models', 'models'))
-
 hiddenimports = []
 datas = []
 for _pkg in _real_third_party:
@@ -51,6 +46,11 @@ for _pkg in _real_third_party:
     except Exception:
         # 个别包无 data 文件时忽略（不阻断打包）
         pass
+
+# 随包分发的小权重模型（LAION 美学线性头约 3KB，只读，打进 _internal/models）
+import os as _os
+if _os.path.isdir('models'):
+    datas.append(('models', 'models'))
 
 # 兜底：显式列出关键顶层导入，确保 collect_submodules 漏网时仍被包含
 hiddenimports += [
@@ -79,6 +79,9 @@ a = Analysis(
         'timm', 'sklearn', 'scipy',
         'matplotlib', 'tensorboard', 'wandb',
         'torchaudio',
+        # 环境中同时存在 PyQt5（conda 自带，mediapipe 间接依赖）与 PyQt6，
+        # PyInstaller 禁止同时打包两个 Qt 绑定 —— 本应用只用 PyQt6
+        'PyQt5', 'PySide2', 'PySide6', 'shiboken2', 'shiboken6',
     ],
     noarchive=False,
     optimize=0,
@@ -89,9 +92,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+    [],                     # onedir：二进制与数据由下方 COLLECT 收集进 _internal，
+    exclude_binaries=True,  # 不再重复嵌入 exe（否则 exe 体积翻倍至数 GB）
     name='光影选片助手',
     debug=False,
     bootloader_ignore_signals=False,
