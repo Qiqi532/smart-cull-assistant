@@ -1,21 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-pipeline.py —— 端到端分析流水线（扫描→逐张指标→聚类→评分→入库）【MVP 版】
+pipeline.py —— 端到端分析流水线（扫描→逐张指标→聚类→评分→入库）
 
 流程（设计文档 4.3 / 5）：
     1. 扫描目录（JPEG/PNG 默认，RAW 可选）
-    2. 阶段一（流式、内存友好）：逐张解码 → 质量（模糊/曝光/BRISQUE）→ pHash
-       → 人脸/闭眼(EAR)，结果【逐张写库】，线程池并行纯 cv2 部分
-    3. 阶段二（CLIP 批量，一次前向）：美学 + 场景，结果逐批回写
+    2. 阶段一（分块流式）：解码 → 质量（模糊/曝光）→ pHash，线程池并行
+       → 画质模型分块批量 GPU 推理 → 人脸/闭眼 → 【分块批量写库】
+    3. 阶段二（CLIP 批量，一次前向）：美学 + 场景，结果分块回写
     4. 相似聚类（时间戳连拍 + pHash 并查集）
-    5. 组内场景自适应评分、废片判定、最佳帧推荐 / 不确定候选甄选 → 全量入库
+    5. 组内场景自适应评分、废片判定、最佳帧推荐 / 不确定候选甄选 → 分块入库
 
-MVP 新增能力：
-    - 内存控制：不再一次性缓存全部原图，逐张/分批处理，5000+ 张不爆内存；
-    - 断点续跑：阶段一/二结果实时落库，中断（含断电/异常）后重启只补算缺失部分；
-    - 增量分析：mtime 未变化的照片跳过重算（复用已有指标）；
-    - 并行化：模糊/曝光/哈希等无状态计算用线程池；CLIP 批量前向；
-    - 分阶段计时：返回 phase_timing，供 scripts/benchmark.py 分段耗时统计。
+关键特性：
+    - 内存有界：按 CHUNK 分块处理，任何时刻只有一"块"原图在内存，5000+ 张不爆内存；
+    - 断点续跑：阶段一/二结果实时落库，中断后重启只补算缺失部分；
+    - 增量分析：mtime 未变化的照片跳过重算；
+    - 并行化：解码/质量/哈希用线程池；画质模型与 CLIP 走 GPU 批量前向；
+    - 分阶段计时：返回 phase_timing，供 scripts/benchmark.py 统计。
+
+【修复 v0.4】相较上一版修正的问题：
+    * 组循环内重建 `idx_of_path = {path: i for i in range(n)}` → O(G×N) 复杂度。
+      5000 张照片时是 2500 万次字典插入，纯属浪费。已提到循环外构建一次。
+    * 组内 `next(x for x in scored if x["path"] == p)` 与 `picks.index(p)` 均为
+      线性查找 → O(组²)。改为字典索引。
+    * 「高度重复」误伤：Top2 之外一律判废（20 张连拍废 18 张）。改为只有与最佳帧
+      pHash 距离 ≤ DUP_HAMMING_STRICT 的真·重复才判废，落选者仅标记"相似·落选"。
+    * 取消不可达：as_completed 后再调 f.cancel() 对已执行/执行中的任务无效，
+      且 ThreadPoolExecutor.__exit__ 会阻塞等待全部完成。改为分块提交 +
+      块间检查，取消在一个块内（通常 <2s）生效。
+    * futures dict 持有全部结果 → 所有解码后的 RGB 数组驻留内存直到循环结束。
+      改为分块提交，用完即弃。
 
 独立命令行调试：python -m engine.pipeline <目录> [--db 路径]
 """
@@ -23,7 +36,7 @@ from __future__ import annotations
 
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -43,10 +56,13 @@ ANALYZE_SIZE = config.ANALYZE_SIZE        # 质量/人脸分析尺寸
 CLIP_BATCH = config.CLIP_BATCH            # CLIP 批量推理大小（GPU 友好）
 CLIP_LOAD_SIZE = config.CLIP_LOAD_SIZE    # CLIP 重解码尺寸
 QUALITY_WORKERS = config.QUALITY_WORKERS  # 质量检测线程池并行数
+# 分块大小：内存与"取消响应速度"的共同旋钮。块越大 GPU 利用率越高，
+# 但内存占用与取消延迟同步上升。经验值 = 线程数 × 4。
+CHUNK = max(QUALITY_WORKERS * 4, 8)
 
 
 def _ai_model_signature() -> str:
-    """AI 模型签名（美学 + 质量 + 闭眼）。任一模型升级 → 签名变化 → 全量重算。"""
+    """AI 模型签名（美学 + 画质 + 闭眼）。任一模型升级 → 签名变化 → 全量重算。"""
     aes = aesthetic_model_name()
     q = quality.quality_model_name()
     eye = _faces.eye_model_name() if _faces is not None else "none"
@@ -83,6 +99,94 @@ def _stage1_worker(path: str) -> dict:
     except Exception as e:
         _log.warning("阶段一处理失败 %s: %s", path, e)
         return {"ok": False, "path": path}
+
+
+def _write_stage1_batch(store: PhotoStore, metas: list[dict], results: list[dict]):
+    """批量写入阶段一结果（单事务；断点续跑的最小落库单元）。"""
+    rows = []
+    for m, s1 in zip(metas, results):
+        base = {"path": m["path"], "fname": m["fname"], "ts": m["ts"], "mtime": m["mtime"],
+                "width": m["width"], "height": m["height"]}
+        if not s1.get("ok"):
+            # 解码失败的照片也记录 mtime，避免每次重试（仍是 NULL 指标，重算可覆盖）
+            rows.append(base)
+            continue
+        rows.append({**base,
+                     "blur_score": s1["blur_score"], "over_ratio": s1["over"],
+                     "under_ratio": s1["under"], "brisque": s1["quality"],
+                     "is_face": int(s1["is_face"]), "eye_open": s1["ear"],
+                     "eye_close_prob": s1["eye_close_prob"], "phash": s1["phash"]})
+    if rows:
+        store.upsert_photos_batch(rows)
+
+
+def _run_stage1(store: PhotoStore, metas: list[dict], idxs: list[int],
+                use_faces: bool, progress_cb, cancel_check) -> tuple[dict, int]:
+    """阶段一：分块流式处理，返回 (stage1 指标 dict, 已完成数)。
+
+    分块是本项目内存与响应性的关键：
+      * 每块提交 CHUNK 个任务 → 内存占用恒定，与照片总数无关；
+      * 块与块之间检查取消标志 → 取消在一个块内生效（不再等完全部任务）；
+      * 每块内部：线程池解码 → 画质模型批量 GPU 推理 → 人脸检测（单例）→ 批量写库。
+    """
+    stage1: dict[int, dict] = {}
+    total = len(idxs)
+    done = 0
+    for start in range(0, total, CHUNK):
+        if cancel_check and cancel_check():
+            break
+        chunk_idxs = idxs[start:start + CHUNK]
+        chunk_metas = [metas[i] for i in chunk_idxs]
+
+        # --- a) 线程池解码 + 质量 + pHash（纯 CPU，GIL 可释放）---
+        with ThreadPoolExecutor(max_workers=QUALITY_WORKERS) as ex:
+            raw = list(ex.map(_stage1_worker, [m["path"] for m in chunk_metas]))
+
+        # --- b) 画质模型批量 GPU 推理（一次前向算完整个块）---
+        valid_pos = [k for k, r in enumerate(raw) if r.get("ok")]
+        qscores: dict[int, float | None] = {}
+        if valid_pos:
+            try:
+                vals = quality.iqa_score_batch([raw[k]["rgb"] for k in valid_pos])
+                qscores = dict(zip(valid_pos, vals))
+            except Exception as e:
+                _log.warning("画质模型批量推理失败，本块退化为纯拉普拉斯：%s", e)
+
+        # --- c) 人脸/闭眼（MediaPipe 单例，串行安全）+ 汇总 ---
+        results = []
+        for k, r in enumerate(raw):
+            if not r.get("ok"):
+                results.append({"ok": False})
+                continue
+            face = {"is_face": False, "ear": None, "eyes_closed": False,
+                    "eye_close_prob": None}
+            if use_faces and _faces is not None:
+                try:
+                    fr = _faces.detect_face_and_eyes(r["rgb"], r["pil"])
+                    face = {"is_face": fr["is_face"], "ear": fr["ear"],
+                            "eyes_closed": fr["eyes_closed"],
+                            "eye_close_prob": fr["eye_close_prob"]}
+                except Exception as e:
+                    _log.warning("人脸检测异常 %s: %s", r["path"], e)
+            results.append({
+                "ok": True,
+                "blur_score": r["q"]["blur_score"],
+                "over": r["q"]["over"], "under": r["q"]["under"],
+                "quality": qscores.get(k),      # 0-100，越高越好（可为 None）
+                "is_face": face["is_face"], "ear": face["ear"],
+                "eyes_closed": face["eyes_closed"],
+                "eye_close_prob": face["eye_close_prob"],
+                "phash": r["phash"],
+            })
+
+        # --- d) 批量落库（断点续跑：已完成部分立即持久化）---
+        _write_stage1_batch(store, chunk_metas, results)
+        for i, s in zip(chunk_idxs, results):
+            stage1[i] = s
+        done += len(chunk_idxs)
+        if progress_cb:
+            progress_cb("质量与哈希", done, total)
+    return stage1, done
 
 
 def analyze_directory(root: str, db_path: str,
@@ -131,11 +235,27 @@ def analyze_directory(root: str, db_path: str,
         if progress_cb:
             progress_cb(phase, done, total)
 
+    def cancelled(phase: str, **extra) -> dict:
+        payload = {"total": n, "message": "已取消", "cancelled": True,
+                   "new_analyzed": n_new, "phase_timing": phase_t}
+        payload.update(extra)
+        _phase_end(phase)
+        return payload
+
     # 阈值覆盖（默认取 config，界面滑块修改即生效）
     burst_interval_ms = burst_interval_ms if burst_interval_ms is not None else config.BURST_INTERVAL_MS
     phash_threshold = phash_threshold if phash_threshold is not None else config.PHASH_THRESHOLD
     score_gap = score_gap if score_gap is not None else config.SCORE_GAP
     scene_conf_low = scene_conf_low if scene_conf_low is not None else config.SCENE_CONF_LOW
+
+    # ---- 0) 模型环境准备：缓存自愈 + 变量注入（避免离线/缓存残缺导致整体崩溃）----
+    try:
+        from . import models_guard
+
+        models_guard.apply_env()
+        models_guard.repair_hf_cache()
+    except Exception as e:  # noqa: BLE001 —— 环境准备失败不应阻断分析
+        _log.warning("模型环境准备失败（继续尝试加载）：%s", e)
 
     # ---- 1) 扫描 ----
     _phase_start("扫描")
@@ -153,22 +273,19 @@ def analyze_directory(root: str, db_path: str,
     _phase_start("读取元数据")
     report("读取元数据", 0, n)
     with PhotoStore(db_path) as store:
-        # 切换分析源：若上次分析的目录与本次不同，重置旧库（避免跨源混杂/重复行）
         prev_root = store.get_meta("source_root")
         if prev_root and prev_root != root_abs:
             store.clear_all()
-        # AI 模型升级失效：任一模型版本变化 → 旧库整体重算
         prev_sig = store.get_meta("ai_models")
         cur_sig = _ai_model_signature()
         if prev_sig and prev_sig != cur_sig:
             store.clear_all()
         elif prev_sig is None and store.count_photos() > 0:
             store.clear_all()
-        meta = []       # 每张：{path, fname, ts, mtime, width, height}
-        # 性能关键：一次性读回旧库，避免 1000+ 次逐行查询
+        meta: list[dict] = []
         old_map = store.photos_map()
-        need_stage1 = []    # 需要阶段一（新文件 / mtime 变化 / 断点缺失）
-        need_clip = set()   # 需要 CLIP（新分析 / 断点缺失 aesthetic）
+        need_stage1: list[int] = []
+        need_clip: set[int] = set()
         for i, p in enumerate(paths):
             if cancel_check and cancel_check():
                 return {"total": n, "message": "已取消", "cancelled": True, "phase_timing": phase_t}
@@ -178,12 +295,9 @@ def analyze_directory(root: str, db_path: str,
                          "mtime": mt, "width": ex["width"], "height": ex["height"]})
             old = old_map.get(p)
             mtime_ok = old and abs((old.get("mtime") or 0) - mt) < 1e-6
-            # 增量 + 断点：mtime 一致且阶段一字段齐全 → 跳过阶段一
             stage1_ok = mtime_ok and old.get("blur_score") is not None and old.get("phash")
             if not stage1_ok:
                 need_stage1.append(i)
-            # CLIP：本批次新分析的，或断点时缺 aesthetic 的
-            if not stage1_ok:
                 need_clip.add(i)
             elif old and (old.get("aesthetic") is None or old.get("scene") is None):
                 need_clip.add(i)
@@ -191,66 +305,27 @@ def analyze_directory(root: str, db_path: str,
                 progress_cb("读取元数据", i + 1, n)
         _phase_end("读取元数据")
 
-        # ---- 3) 阶段一：质量/BRISQUE/人脸/phash（流式 + 线程池）----
+        # ---- 3) 阶段一：质量/画质模型/人脸/phash（分块流式 + 线程池 + 批量 GPU）----
         n_new = len(need_stage1)
-        stage1 = {}      # idx -> 阶段一指标 dict
+        stage1: dict[int, dict] = {}
         if n_new > 0:
             _phase_start("质量与哈希")
             report("质量与哈希", 0, n_new)
-            done = 0
-            with ThreadPoolExecutor(max_workers=QUALITY_WORKERS) as ex:
-                futs = {ex.submit(_stage1_worker, meta[idx]["path"]): idx for idx in need_stage1}
-                for fut in as_completed(futs):
-                    if cancel_check and cancel_check():
-                        # 取消：放弃未完成结果，已完成的已逐张落库
-                        for f in futs:
-                            f.cancel()
-                        _phase_end("质量与哈希")
-                        return {"total": n, "message": "已取消", "cancelled": True,
-                                "new_analyzed": done, "phase_timing": phase_t}
-                    idx = futs[fut]
-                    r = fut.result()
-                    if not r.get("ok"):
-                        stage1[idx] = {"ok": False}
-                    else:
-                        rgb, pil, q = r["rgb"], r["pil"], r["q"]
-                        # 以下两步在主线程串行（共享 torch/pyiqa 与 MediaPipe 实例，避免并发）
-                        brisque = quality.brisque_score_array(rgb)
-                        face = {"is_face": False, "ear": None, "eyes_closed": False,
-                                "eye_close_prob": None}
-                        if use_faces and _faces is not None:
-                            try:
-                                fr = _faces.detect_face_and_eyes(rgb, pil)
-                                face = {"is_face": fr["is_face"], "ear": fr["ear"],
-                                        "eyes_closed": fr["eyes_closed"],
-                                        "eye_close_prob": fr["eye_close_prob"]}
-                            except Exception as e:
-                                _log.warning("人脸检测异常 %s: %s", meta[idx]["path"], e)
-                        stage1[idx] = {
-                            "ok": True, "blur_score": q["blur_score"],
-                            "over": q["over"], "under": q["under"], "brisque": brisque,
-                            "is_face": face["is_face"], "ear": face["ear"],
-                            "eyes_closed": face["eyes_closed"],
-                            "eye_close_prob": face["eye_close_prob"],
-                            "phash": r["phash"],
-                        }
-                        # 【断点续跑】阶段一结果立即写库（WAL 单事务，断电/异常不丢已算部分）
-                        _write_stage1(store, meta[idx], stage1[idx])
-                    done += 1
-                    report("质量与哈希", done, n_new)
+            stage1, done = _run_stage1(store, meta, need_stage1, use_faces,
+                                       progress_cb, cancel_check)
             _phase_end("质量与哈希")
+            if cancel_check and cancel_check():
+                return cancelled("质量与哈希", new_analyzed=done)
 
         # ---- 4) 阶段二：CLIP 批量（美学 + 场景，一次前向，GPU 优先）----
         _phase_start("美学与场景")
         order = sorted(need_clip)
-        clip_res = {}
+        clip_res: dict[int, dict] = {}
         if order:
             report("美学与场景", 0, len(order))
             for b in range(0, len(order), CLIP_BATCH):
                 if cancel_check and cancel_check():
-                    _phase_end("美学与场景")
-                    return {"total": n, "message": "已取消", "cancelled": True,
-                            "new_analyzed": n_new, "phase_timing": phase_t}
+                    return cancelled("美学与场景")
                 batch_idx = order[b:b + CLIP_BATCH]
                 batch_imgs, valid = [], []
                 for i in batch_idx:
@@ -260,13 +335,15 @@ def analyze_directory(root: str, db_path: str,
                         valid.append(i)
                 if valid:
                     res = analyze_batch(batch_imgs)
+                    rows = []
                     for i, r in zip(valid, res):
                         clip_res[i] = r
-                        # 【断点续跑】逐张回写美学/场景
-                        store.update_photo(meta[i]["path"],
-                                           aesthetic=r["aesthetic"],
-                                           scene=r["scene"],
-                                           scene_conf=r["scene_conf"])
+                        rows.append({"path": meta[i]["path"],
+                                     "aesthetic": r["aesthetic"],
+                                     "scene": r["scene"],
+                                     "scene_conf": r["scene_conf"]})
+                    # 【断点续跑】逐批回写美学/场景（批量事务）
+                    store.upsert_photos_batch(rows)
                 if progress_cb:
                     progress_cb("美学与场景", min(b + CLIP_BATCH, len(order)), len(order))
         _phase_end("美学与场景")
@@ -280,16 +357,14 @@ def analyze_directory(root: str, db_path: str,
             if i in stage1 and stage1[i].get("ok"):
                 h = stage1[i]["phash"]
             else:
-                old = old_map.get(m["path"])
-                h = (old or {}).get("phash") or ""
+                h = (old_map.get(m["path"]) or {}).get("phash") or ""
             phash_hexes.append(h)
             ts_list.append(m["ts"])
 
-        # 聚类（传入预计算 phash，避免增量/断点时重复解码）
         hexes, group_ids, groups = similarity.group_similar(
             [m["path"] for m in meta], ts_list,
             burst_interval_ms=burst_interval_ms, phash_threshold=phash_threshold,
-            progress_cb=lambda done, total: report("相似聚类", done, total),
+            progress_cb=lambda d, t: report("相似聚类", d, t),
             phash_hexes=phash_hexes)
         _phase_end("相似聚类")
 
@@ -298,20 +373,15 @@ def analyze_directory(root: str, db_path: str,
 
         def resolve_scene(idx):
             p = meta[idx]["path"]
-            # 1) 参数传入的人工修正（本次会话）
             if p in scene_override:
                 return scene_override[p], 1.0
-            # 2) 强制整批场景
             if forced_scene:
                 return forced_scene, 1.0
-            # 3) DB 中人工修正的场景（场景手动修正入口，跨会话持久）
             old_row = old_map.get(p)
             if old_row and old_row.get("scene_manual"):
                 return old_row["scene_manual"], 1.0
-            # 4) 本次 CLIP 结果
             if idx in clip_res:
                 return clip_res[idx]["scene"], clip_res[idx]["scene_conf"]
-            # 5) 复用已存自动场景
             if old_row and old_row.get("scene"):
                 return old_row["scene"], old_row.get("scene_conf") or 1.0
             return "其他", 1.0
@@ -327,20 +397,24 @@ def analyze_directory(root: str, db_path: str,
         # ---- 7) 组内评分、废片判定、最佳帧/不确定甄选 ----
         _phase_start("评分与甄选")
         report("评分与甄选", 0, len(groups))
+
+        # 【修复 v0.4】路径→索引映射只构建一次。
+        # 旧实现把它写在组循环内部，复杂度 O(组数 × 照片数)；5000 张照片、
+        # 1000 个组就是 500 万次无谓的字典插入，纯 CPU 空转。
+        idx_of_path = {m["path"]: i for i, m in enumerate(meta)}
+
         n_best = 0
         n_uncertain_groups = 0
         n_candidate_photos = 0
         waste_count = 0
+
         for gi, group in enumerate(groups):
             if cancel_check and cancel_check():
-                _phase_end("评分与甄选")
-                return {"total": n, "message": "已取消", "cancelled": True,
-                        "new_analyzed": n_new, "phase_timing": phase_t}
-            # 组内索引
-            idx_of_path = {meta[i]["path"]: i for i in range(n)}
+                return cancelled("评分与甄选")
             member_idx = [idx_of_path[p] for p in group]
+
             # 场景：取组内主要场景（人像/风光优先于其他）
-            scene_counts = {}
+            scene_counts: dict[str, int] = {}
             for i in member_idx:
                 s, _ = resolve_scene(i)
                 scene_counts[s] = scene_counts.get(s, 0) + 1
@@ -350,11 +424,10 @@ def analyze_directory(root: str, db_path: str,
                 scene = "风光"
             else:
                 scene = "其他"
-            # 组置信度：组内场景置信度均值
             confs = [resolve_scene(i)[1] for i in member_idx]
             group_conf = sum(confs) / len(confs) if confs else 1.0
 
-            # 计算每张的综合分（废片原因在判定后基于 dup_paths 再算）
+            # 组内每张的综合分
             scored = []
             for i in member_idx:
                 p = meta[i]["path"]
@@ -367,18 +440,18 @@ def analyze_directory(root: str, db_path: str,
                          "under": old.get("under_ratio") or 0.0,
                          "is_face": bool(old.get("is_face")),
                          "ear": old.get("eye_open"),
-                         "brisque": old.get("brisque"),
+                         "quality": old.get("brisque"),
                          "eyes_closed": _eyes_closed_from_row(old)}
                 aes = resolve_aesthetic(i)
-                s, conf = resolve_scene(i)
-                photo_score = scorer.analyze_photo_score(
-                    {**m, "aesthetic": aes}, scene, weights)
+                s, _ = resolve_scene(i)
+                photo_score = scorer.analyze_photo_score({**m, "aesthetic": aes}, scene, weights)
+                # 闭眼硬判不再要求 scene == "人像"（见 scorer.waste_reasons）
                 hw = scorer.is_hard_waste(
                     scene, m["blur_score"], m["over"], m["under"],
-                    bool(m.get("eyes_closed", False)), m.get("brisque"))
+                    bool(m.get("eyes_closed", False)), m.get("quality"),
+                    is_face=bool(m.get("is_face", False)))
                 scored.append({**photo_score, "path": p, "hard_waste": hw})
 
-            # 判定：best / uncertain（阈值可被界面滑块覆盖）
             verdict, picks = scorer.judge_and_pick(scored, scene, group_conf,
                                                    score_gap=score_gap,
                                                    scene_conf_low=scene_conf_low)
@@ -390,70 +463,86 @@ def analyze_directory(root: str, db_path: str,
             elif picks:
                 n_best += 1
 
-            # “高度重复”去重废片语义（见上一版注释）
+            # ---- 「高度重复」判定（修复误伤）----
+            # 旧实现：组内排序 Top2 之外一律判废。那是"排名落败"，不是"重复"。
+            #   组大小 3→废1、5→废3、10→废8、20→废18，摄影师会平白丢掉大量可用素材。
+            # 新实现：只有与最佳帧 pHash 汉明距离极近（≤ DUP_HAMMING_STRICT）
+            #   才算真·重复；其余落选者仅标记 is_similar_loser（默认收起，可找回）。
             dup_paths: set[str] = set()
-            if not is_uncertain and len(scored) > 2:
-                scored_sorted = sorted(scored, key=lambda x: -x["comp_score"])
-                dup_paths = {x["path"] for x in scored_sorted[2:]}
+            loser_paths: set[str] = set()
+            if best_path and len(scored) > 1:
+                best_i = idx_of_path.get(best_path)
+                best_hex = hexes[best_i] if best_i is not None else ""
+                for x in scored:
+                    if x["path"] == best_path:
+                        continue
+                    i = idx_of_path.get(x["path"])
+                    h = hexes[i] if i is not None else ""
+                    if best_hex and h and similarity.hamming_hex(best_hex, h) <= config.DUP_HAMMING_STRICT:
+                        dup_paths.add(x["path"])
+                    else:
+                        loser_paths.add(x["path"])
 
-            # 组内每张入库（批量事务写入）
+            # ---- 组内每张入库 ----
+            # 【修复 v0.4】旧实现用 next(x for x in scored if x["path"] == p) 与
+            # picks.index(p) 做线性查找，复杂度 O(组²)。改为字典，O(1)。
+            scored_by_path = {x["path"]: x for x in scored}
+            pick_rank = {x["path"]: k + 1 for k, x in enumerate(picks)}
+
             rows = []
             for i in member_idx:
                 p = meta[i]["path"]
                 m = stage1.get(i, {})
+                m_ok = bool(m.get("ok"))
                 old = old_map.get(p) or {}
                 ph = hexes[i]
-                ps = next((x for x in scored if x["path"] == p), None)
+                ps = scored_by_path.get(p)
                 comp = ps["comp_score"] if ps else 0.0
-                dup = p in dup_paths
-                m_ok = bool(m.get("ok"))
+
+                # 指标取值：优先本次计算结果，否则回落到库中历史值
+                blur = m.get("blur_score") if m_ok else (old.get("blur_score") or 0.0)
+                over = m.get("over") if m_ok else (old.get("over_ratio") or 0.0)
+                under = m.get("under") if m_ok else (old.get("under_ratio") or 0.0)
+                qscore = m.get("quality") if m_ok else old.get("brisque")
+                is_face = bool(m.get("is_face", False)) if m_ok else bool(old.get("is_face"))
+                eyes_closed = (bool(m.get("eyes_closed", False)) if m_ok
+                               else _eyes_closed_from_row(old))
+
                 reasons = scorer.waste_reasons(
-                    scene,
-                    (m.get("blur_score") if m_ok else (old.get("blur_score") or 0.0)),
-                    (m.get("over") if m_ok else (old.get("over_ratio") or 0.0)),
-                    (m.get("under") if m_ok else (old.get("under_ratio") or 0.0)),
-                    (bool(m.get("eyes_closed", False)) if m_ok else _eyes_closed_from_row(old)),
-                    dup,
-                    (m.get("brisque") if m_ok else old.get("brisque")))
+                    scene, blur, over, under, eyes_closed,
+                    dup=p in dup_paths, brisque=qscore, is_face=is_face)
+
                 s, conf = resolve_scene(i)
                 aes = resolve_aesthetic(i)
-                is_cand = is_uncertain and p in [x["path"] for x in picks]
-                rank = ([x["path"] for x in picks].index(p) + 1) if is_cand else 0
+                is_cand = is_uncertain and p in pick_rank
+                rank = pick_rank.get(p, 0) if is_cand else 0
                 is_best = (not is_uncertain and p == best_path)
-                row = {
-                    "path": p,
-                    "fname": meta[i]["fname"],
-                    "ts": meta[i]["ts"],
-                    "mtime": meta[i]["mtime"],
-                    "width": meta[i]["width"],
+                rows.append({
+                    "path": p, "fname": meta[i]["fname"], "ts": meta[i]["ts"],
+                    "mtime": meta[i]["mtime"], "width": meta[i]["width"],
                     "height": meta[i]["height"],
                     "scene": s, "scene_conf": conf,
-                    "blur_score": (m.get("blur_score") if m.get("ok") else (old.get("blur_score") or 0.0)),
-                    "over_ratio": (m.get("over") if m.get("ok") else (old.get("over_ratio") or 0.0)),
-                    "under_ratio": (m.get("under") if m.get("ok") else (old.get("under_ratio") or 0.0)),
+                    "blur_score": blur, "over_ratio": over, "under_ratio": under,
                     "aesthetic": aes,
                     "eye_open": (m.get("ear") if m_ok else old.get("eye_open")),
-                    "is_face": int(m.get("is_face", False) if m_ok else bool(old.get("is_face"))),
-                    "brisque": (m.get("brisque") if m_ok else old.get("brisque")),
-                    "eye_close_prob": (m.get("eye_close_prob") if m_ok else old.get("eye_close_prob")),
-                    "phash": ph,
-                    "group_id": gi,
-                    "comp_score": comp,
+                    "is_face": int(is_face), "brisque": qscore,
+                    "eye_close_prob": (m.get("eye_close_prob") if m_ok
+                                       else old.get("eye_close_prob")),
+                    "phash": ph, "group_id": gi, "comp_score": comp,
                     "is_waste": 1 if reasons else 0,
                     "is_best": 1 if is_best else 0,
                     "is_uncertain": 1 if is_uncertain else 0,
                     "is_candidate": 1 if is_cand else 0,
                     "candidate_rank": rank,
+                    "is_similar_loser": 1 if p in loser_paths else 0,
                     "waste_reasons": ",".join(reasons) if reasons else None,
-                    "star": ((old.get("star") if old else 0) or 0)
-                            or (5 if (is_best and not (old.get("star") if old else 0)) else 0),
+                    # 人工标星优先级高于自动推荐：已有星级一律保留
+                    "star": (old.get("star") or 0) or (5 if is_best else 0),
                     "label": (old.get("label") if old else None),
-                }
-                rows.append(row)
+                })
                 if reasons:
                     waste_count += 1
             store.upsert_photos_batch(rows)
-            # 组记录
             store.set_group(gi, len(group), best_path, is_uncertain, n_candidates)
             if is_uncertain:
                 n_candidate_photos += n_candidates
@@ -484,33 +573,13 @@ def analyze_directory(root: str, db_path: str,
         }
 
 
-def _write_stage1(store: PhotoStore, m: dict, s1: dict):
-    """把阶段一结果写库（断点续跑的最小落库单元）。"""
-    if not s1.get("ok"):
-        # 解码失败的照片也记录 mtime，避免每次重试（仍是 NULL 指标，重算可覆盖）
-        store.upsert_photo({
-            "path": m["path"], "fname": m["fname"], "ts": m["ts"], "mtime": m["mtime"],
-            "width": m["width"], "height": m["height"],
-        })
-        return
-    store.upsert_photo({
-        "path": m["path"], "fname": m["fname"], "ts": m["ts"], "mtime": m["mtime"],
-        "width": m["width"], "height": m["height"],
-        "blur_score": s1["blur_score"], "over_ratio": s1["over"],
-        "under_ratio": s1["under"], "brisque": s1["brisque"],
-        "is_face": int(s1["is_face"]), "eye_open": s1["ear"],
-        "eye_close_prob": s1["eye_close_prob"], "phash": s1["phash"],
-    })
-
-
 # ---------------------------------------------------------------------------
 # 命令行调试入口
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import sys
 
-    root = sys.argv[1] if len(sys.argv) > 1 else "data"
-    db = sys.argv[2] if len(sys.argv) > 2 else "data/cull.db"
-    print(f"分析目录: {root} -> DB: {db}")
-    summary = analyze_directory(root, db)
-    print("汇总：", summary)
+    _root = sys.argv[1] if len(sys.argv) > 1 else "data"
+    _db = sys.argv[2] if len(sys.argv) > 2 else "data/cull.db"
+    print(f"分析目录: {_root} -> DB: {_db}")
+    print("汇总：", analyze_directory(_root, _db))

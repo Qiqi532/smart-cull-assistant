@@ -14,16 +14,28 @@ config.py —— 全项目可调参数唯一来源（MVP 配置集中化）
 from __future__ import annotations
 
 import os
+import sys
 
 # ===========================================================================
 # 一、路径与目录（项目内所有缓存/数据，均不落 C 盘）
 # ===========================================================================
-# 项目根目录（photo-cull-demo/）
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 根目录的双形态解析：
+#   开发态    → photo-cull-demo/（engine/ 的上一级）
+#   打包态    → exe 所在目录（onedir 下 dist\光影选片助手\）。
+# 必须区分：PyInstaller onedir 打包后 __file__ 指向只读的 _internal，
+# 且安装目录可能是 Program Files —— 数据库/日志/模型缓存等可写内容
+# 一律放 exe 旁；只读的随包模型权重放 _internal（sys._MEIPASS）。
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = os.path.dirname(os.path.abspath(sys.executable))
+    _BUNDLED_ROOT = getattr(sys, "_MEIPASS", PROJECT_ROOT)
+else:
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _BUNDLED_ROOT = PROJECT_ROOT
 
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")          # 数据目录（测试图 / 数据库）
 DEFAULT_DB = os.path.join(DATA_DIR, "cull.db")         # 默认 SQLite 索引库
-MODELS_DIR = os.path.join(PROJECT_ROOT, "models")      # 模型权重目录（小权重随项目分发）
+# 只读模型权重：开发态在 models/，打包态在 _internal/models（随包分发）
+MODELS_DIR = os.path.join(_BUNDLED_ROOT, "models")
 THUMB_DIR_NAME = ".thumbs"                             # 缩略图缓存目录名（扫描时自动跳过点开头目录）
 LOG_FILE = os.path.join(PROJECT_ROOT, "smart_cull.log")  # 统一日志文件
 
@@ -39,6 +51,8 @@ PHASH_SIZE = 256           # pHash 计算用图最大边长
 THUMB_DEFAULT_SIZE = 320   # 缩略图默认尺寸（app 展示）
 THUMB_QUALITY = 88         # 缩略图 JPEG 质量
 THUMB_MAX_SIZE = 1000      # 大图对比展示尺寸（app 复核页）
+# 缩略图缓存目录：必须在【项目内】，绝不能写进用户照片目录（会污染图库、被网盘同步）
+THUMB_CACHE_DIR = os.path.join(DATA_DIR, ".thumbcache")
 
 # ===========================================================================
 # 三、质量检测（quality.py）
@@ -49,6 +63,38 @@ BLUR_ANALYZE_SIZE = 512        # 拉普拉斯方差统一分析尺寸（保证�
 BRISQUE_ANALYZE_SIZE = 512     # BRISQUE 输入尺寸
 BRISQUE_SATURATED = 80.0       # BRISQUE ≥80 高度怀疑非自然内容（插画/截图）→ 中性化保护
 BRISQUE_WASTE_THRESHOLD = 50.0 # BRISQUE > 50 视为严重失真（仅作评分参考，不作废片触发源）
+
+# --- 【模型升级 v0.4】无参考画质模型（可插拔 + 自动降级链）-------------------
+# 背景：BRISQUE（LIVE 数据集，2000 年代手工特征）在 KonIQ-10k 上 SRCC 仅 ~0.665，
+#       而 MUSIQ ~0.916、DBCNN ~0.88。本项目实测（data/demo，Cohen's d）：
+#         brisque 60ms d=-19.3（合成极端图上虚高，真实照片上泛化差）
+#         musiq   74ms d= 4.08 ｜ musiq-ava 44ms d=3.59
+#         clipiqa 93ms d= 6.46 ｜ dbcnn     39ms d=6.83
+#       结论：默认换 musiq（KonIQ 训练，真实照片失真感知），并按顺序自动降级。
+IQA_MODEL = "musiq"                       # 首选画质模型（pyiqa 名）
+IQA_FALLBACKS = ["dbcnn", "brisque"]      # 依次降级；全部失败则退化为纯拉普拉斯
+IQA_ANALYZE_SIZE = 512                    # 画质模型输入边长
+IQA_BATCH_SIZE = 8                        # 画质模型 GPU 批大小（0=逐张）
+# 各画质模型的原始量程，用于统一归一化为 0-100（越高越好）
+IQA_RANGES = {
+    "musiq": (0.0, 100.0),      # KonIQ MOS 1-5 → pyiqa 已放大到 0-100
+    "musiq-ava": (1.0, 10.0),   # AVA 1-10
+    "musiq-koniq": (0.0, 100.0),
+    "dbcnn": (0.0, 1.0),
+    "brisque": (0.0, 100.0),    # 失真分，越低越好 —— 需反向
+    "clipiqa": (0.0, 1.0),
+    "niqe": (0.0, 100.0),       # 失真分，越低越好
+}
+IQA_LOWER_IS_BETTER = {"brisque", "niqe", "ilniqe"}   # 这几个是失真分，需反向归一
+
+# --- 【模型升级 v0.4】美学模型（真实照片优先）-------------------------------
+# 注意：musiq-ava 作为美学模型目前是【预留配置，尚未接入】—— aesthetics.py 当前
+# 实现为 LAION 线性头（laion-head）→ CLIP 提示词（clip-prompt）两级降级。
+# 原因：AVA 监督模型（musiq-ava）在画质基准上表现更好，但其分数量纲与 LAION 头
+# 不同，接入需同步调整 scorer 权重与旧库迁移逻辑，见 CHANGELOG 的跟进计划。
+AESTHETIC_MODEL = "laion-head"            # 当前生效：LAION 线性头
+AESTHETIC_FALLBACKS = ["clip-prompt"]     # 头部缺失/加载失败时降级
+AESTHETIC_ANALYZE_SIZE = 512              # 美学模型输入边长
 
 # ===========================================================================
 # 四、相似聚类（similarity.py）
@@ -62,6 +108,18 @@ PHASH_HASH_SIZE = 8            # pHash 位数（8x8=64 位）
 # ===========================================================================
 EAR_CLOSED_THRESHOLD = 0.20    # EAR < 0.20 视为闭眼（明显闭眼）
 FACE_NEUTRAL_N = 0.5           # 检测不到人脸时 face 维度取中性值（不做闭眼硬判）
+# --- 【修复 v0.4】EAR 归一化区间 -------------------------------------------
+# 原实现 norm_face = clip(EAR / 0.35)：实测睁眼 EAR 约 0.30~0.45，0.36 即打满 1.0，
+# 导致"睁得大"和"刚睁开"无法区分；闭眼 EAR 约 0.05~0.20 却仍能有 0.14~0.57 分，
+# 区分度严重不足。改为 [EAR_CLOSED_REF, EAR_OPEN_REF] 线性区间映射 + 截断。
+EAR_CLOSED_REF = 0.10          # EAR ≤ 此值 → face_n = 0
+EAR_OPEN_REF = 0.32            # EAR ≥ 此值 → face_n = 1
+# 闭眼硬判是否依赖场景分类。
+# 【修复 v0.4】原实现仅当 scene == "人像" 才判闭眼废片，而 CLIP 场景分类会把
+# 不少人脸照判成"其他/风光"（实测 face_closed1.jpg → 其他 0.410），
+# 一旦判错，闭眼检测（本工具的核心卖点）就整体失效。
+# 改为：只要【确实检测到人脸】就启用闭眼硬判，与场景分类解耦。
+EYE_WASTE_REQUIRE_PORTRAIT_SCENE = False
 # 闭眼 ViT 分类器（dima806，Apache-2.0，输入为眼睛区域裁剪图）
 EYE_MODEL_NAME = "dima806/closed_eyes_image_detection"
 EYE_MODEL_CONF = 0.60          # 分类器闭眼置信度阈值（高于则判闭眼）
@@ -116,6 +174,16 @@ MAX_CANDIDATES = 5                  # 待甄选候选最多 5 张
 MIN_CANDIDATES = 2                  # 待甄选候选最少 2 张
 FACE_NEUTRAL = FACE_NEUTRAL_N       # 无脸时 face 维度中性值
 
+# --- 【修复 v0.4】重复判定策略 ---------------------------------------------
+# 原实现：组内 Top2 之外的所有照片一律打上「高度重复」废片标记。
+#   组大小 3 → 1 张判废；5 → 3 张；10 → 8 张；20 → 18 张。
+#   问题：这只是"排名落败"，不是"重复"。一张构图不错、只是略逊于同伴的照片会被
+#   标成废片并排除出导出清单，摄影师会因此丢失可用素材。
+# 新策略：落选者只标记为「相似·落选」（不影响废片判定、默认收起但仍可找回），
+#   只有与最佳帧 pHash 汉明距离极近（真·近乎像素重复）才判为「高度重复」废片。
+DUP_MARK_LOSERS_AS_WASTE = False    # False：落选者不判废片
+DUP_HAMMING_STRICT = 4              # pHash 距离 ≤ 4 才视为"高度重复"（64 位中 ≤4 位不同）
+
 # ===========================================================================
 # 八、流水线（pipeline.py）
 # ===========================================================================
@@ -137,3 +205,18 @@ EXPORT_SELECT_MIN_STAR = 4     # “保留清单”默认星级阈值（★≥4 
 # ===========================================================================
 # 分析阶段名（进度回调与断点续跑状态共用）
 PHASES = ["扫描", "读取元数据", "质量与哈希", "美学与场景", "相似聚类", "评分与甄选"]
+
+# ===========================================================================
+# 十一、【修复 v0.4】模型加载健壮性
+# ===========================================================================
+# 网络/缓存故障是本项目实测到的头号崩溃来源：
+#   * HuggingFace 缓存的 .no_exist 标记会随 transformers 升级而过期
+#     （本机实测：旧版写入 processor_config.json 不存在，transformers 5.x 却需要它
+#       → 离线加载 CLIP 直接 OSError 崩溃，GUI 只弹"分析出错"）
+#   * 代理/断网时下载失败会抛出原始异常，用户完全无法自救
+# 对策：缓存自愈 + 离线优先 + 失败可解释。
+AUTO_REPAIR_HF_CACHE = True    # 启动前清理过期的 .no_exist 标记
+OFFLINE_FIRST = True           # 本地缓存存在时优先离线加载，避免网络抖动阻塞启动
+MODEL_LOAD_TIMEOUT = 300       # 单个模型加载超时（秒），超时后走降级链
+# HuggingFace 镜像端点（国内网络可直接下载时留空；被墙时设为 https://hf-mirror.com）
+HF_ENDPOINT = "https://hf-mirror.com"

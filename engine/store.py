@@ -35,15 +35,17 @@ CREATE TABLE IF NOT EXISTS photos (
     is_uncertain INT, is_candidate INT, candidate_rank INT,
     star INT DEFAULT 0, label TEXT, waste_reasons TEXT,
     brisque REAL, eye_close_prob REAL,
-    scene_manual TEXT
+    scene_manual TEXT,
+    is_similar_loser INT
 );
 """
 
 # 老库升级时需补齐的新列（ALTER TABLE ADD COLUMN）
 MIGRATE_COLUMNS = [
-    ("brisque", "REAL"),        # BRISQUE 质量分（LIVE 模型，0-100 越低越好）
+    ("brisque", "REAL"),        # 画质模型分（v0.4 起为 musiq 等，0-100【越高越好】）
     ("eye_close_prob", "REAL"), # 闭眼分类器最大闭眼概率（0-1）
     ("scene_manual", "TEXT"),   # 人工修正的场景（NULL=用自动识别结果）
+    ("is_similar_loser", "INT"),  # 相似组内排名落败者（非废片，默认可收起/可找回）
 ]
 
 GROUPS_SCHEMA = """
@@ -66,7 +68,7 @@ PHOTO_FIELDS = [
     "aesthetic", "eye_open", "is_face", "phash", "group_id",
     "comp_score", "is_waste", "is_best",
     "is_uncertain", "is_candidate", "candidate_rank", "star", "label", "waste_reasons",
-    "brisque", "eye_close_prob", "scene_manual",
+    "brisque", "eye_close_prob", "scene_manual", "is_similar_loser",
 ]
 
 

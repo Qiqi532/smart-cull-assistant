@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QMessageBox, QListWidget, QListWidgetItem, QSplitter,
     QComboBox, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QFrame, QSizePolicy, QButtonGroup, QRadioButton,
-    QLineEdit, QSpinBox)
+    QLineEdit, QSpinBox, QDialog)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
@@ -51,57 +51,80 @@ DEFAULT_DB = config.DEFAULT_DB
 DEMO_DIR = os.path.join(config.DATA_DIR, "demo")
 SCENE_OPTIONS = ["自动", "人像", "风光", "建筑", "街拍", "宠物", "静物", "其他"]
 
-# 主题色（与 Web 版一致）
-C_PRIMARY = "#8BC8EA"
-C_OK = "#52C41A"
-C_WARN = "#FAAD14"
-C_DANGER = "#EA6668"
-C_BG = "#14161A"
-C_BG2 = "#1E2229"
-C_TEXT = "#E8EAED"
-C_MUTED = "#9aa3af"
-C_BORDER = "#2A2F38"
+# 浅色主题调色板（冷静专业：蓝绿强调色 + 中性灰，保证对比度与可读）
+C_PRIMARY = "#3C7DBF"        # 主强调色（冷静蓝）
+C_PRIMARY_DK = "#2C609A"     # 强调色按下态
+C_OK = "#2E9E5B"             # 通过/最佳帧
+C_WARN = "#C9821B"           # 警告/近似重复
+C_DANGER = "#D64550"         # 危险/废片/闭眼
+C_BG = "#F4F6F9"             # 应用背景
+C_PANEL = "#EEF2F7"          # 次级面板（导航/胶片条）
+C_CARD = "#FFFFFF"           # 卡片/面板背景
+C_TEXT = "#1F2933"           # 主文字
+C_MUTED = "#6B7280"          # 次要文字
+C_BORDER = "#E2E8F0"         # 浅边框
+C_BORDER2 = "#CBD5E1"        # 略深边框
 
-DARK_QSS = f"""
+# 半透明强调底色（用于状态条/提示）
+C_OK_SOFT = "rgba(46,158,91,0.12)"
+C_WARN_SOFT = "rgba(201,130,27,0.14)"
+C_DANGER_SOFT = "rgba(214,69,80,0.12)"
+C_PRIMARY_SOFT = "rgba(60,125,191,0.10)"
+
+# 内联回退样式（styles.qss 加载失败时使用，保持浅色一致）
+FALLBACK_QSS = f"""
 QWidget {{ background-color: {C_BG}; color: {C_TEXT}; font-size: 13px; }}
 QMainWindow, QDialog {{ background-color: {C_BG}; }}
 QLabel {{ background: transparent; }}
 QLabel#PageTitle {{ font-size: 20px; font-weight: 700; color: {C_TEXT}; }}
 QLabel#PageSub {{ color: {C_MUTED}; }}
-QLabel#NavStep {{ font-size: 14px; padding: 12px 18px; border-radius: 8px; }}
-QLabel#NavStep[active="true"] {{ background: rgba(139,200,234,0.16); color: {C_PRIMARY}; font-weight: 700; }}
-QLabel#NavStep[active="false"] {{ color: #b8c0cc; }}
 QLabel#SectionTitle {{ font-size: 15px; font-weight: 600; color: {C_PRIMARY}; }}
-QPushButton {{ background: {C_BG2}; border: 1px solid {C_BORDER}; border-radius: 8px;
-               padding: 8px 16px; font-weight: 500; }}
-QPushButton:hover {{ border-color: {C_PRIMARY}; }}
-QPushButton:disabled {{ color: #5a6270; border-color: {C_BORDER}; }}
-QPushButton#Primary {{ background: #2d5d7a; border: 1px solid {C_PRIMARY}; color: white; }}
-QPushButton#Primary:hover {{ background: #36708f; }}
-QPushButton#Danger {{ color: {C_DANGER}; border-color: #6b3436; }}
-QPushButton#Danger:hover {{ background: #3a1f21; }}
-QProgressBar {{ border: 1px solid {C_BORDER}; border-radius: 8px; background: {C_BG2};
+QLabel#Metric {{ font-size: 24px; font-weight: 700; color: {C_PRIMARY}; }}
+QLabel#MetricLabel {{ color: {C_MUTED}; font-size: 12px; }}
+QLabel#PopTitle {{ font-size: 13px; font-weight: 700; color: {C_TEXT}; }}
+QPushButton {{ background: {C_CARD}; border: 1px solid {C_BORDER2}; border-radius: 8px;
+               padding: 8px 16px; font-weight: 500; color: {C_TEXT}; }}
+QPushButton:hover {{ border-color: {C_PRIMARY}; color: {C_PRIMARY}; }}
+QPushButton:pressed {{ background: {C_PANEL}; }}
+QPushButton:disabled {{ color: {C_MUTED}; border-color: {C_BORDER}; }}
+QPushButton#Primary {{ background: {C_PRIMARY}; border: 1px solid {C_PRIMARY}; color: white; }}
+QPushButton#Primary:hover {{ background: {C_PRIMARY_DK}; color: white; }}
+QPushButton#Danger {{ color: {C_DANGER}; border-color: {C_DANGER}; }}
+QPushButton#Danger:hover {{ background: {C_DANGER_SOFT}; }}
+QPushButton#Ghost {{ background: transparent; border: 1px solid {C_BORDER2}; color: {C_MUTED}; }}
+QProgressBar {{ border: 1px solid {C_BORDER}; border-radius: 8px; background: {C_PANEL};
                height: 18px; text-align: center; color: {C_TEXT}; }}
 QProgressBar::chunk {{ background: {C_PRIMARY}; border-radius: 7px; }}
-QListWidget {{ background: {C_BG2}; border: 1px solid {C_BORDER}; border-radius: 8px; }}
+QListWidget#Nav {{ background: {C_PANEL}; border: none; border-right: 1px solid {C_BORDER};
+                   border-radius: 0; }}
+QListWidget#Nav::item {{ padding: 12px 18px; border-radius: 8px; color: {C_TEXT}; }}
+QListWidget#Nav::item:selected {{ background: {C_PRIMARY_SOFT}; color: {C_PRIMARY}; font-weight: 700; }}
+QListWidget#Nav::item:hover {{ background: {C_BORDER}; }}
+QListWidget {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 8px; }}
 QListWidget::item {{ padding: 10px; border-radius: 6px; }}
-QListWidget::item:selected {{ background: #2d5d7a; }}
-QTableWidget {{ background: {C_BG2}; border: 1px solid {C_BORDER}; border-radius: 8px;
-               gridline-color: {C_BORDER}; }}
-QHeaderView::section {{ background: {C_BG2}; color: {C_TEXT}; border: none;
+QListWidget::item:selected {{ background: {C_PRIMARY}; color: white; }}
+QTableWidget {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 8px;
+               gridline-color: {C_BORDER}; color: {C_TEXT}; }}
+QHeaderView::section {{ background: {C_PANEL}; color: {C_TEXT}; border: none;
                         border-bottom: 1px solid {C_BORDER}; padding: 6px; font-weight: 600; }}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollBar:vertical {{ background: {C_BG}; width: 10px; }}
-QScrollBar::handle:vertical {{ background: #3a4150; border-radius: 5px; min-height: 30px; }}
+QScrollBar::handle:vertical {{ background: {C_BORDER2}; border-radius: 5px; min-height: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
-QComboBox, QLineEdit, QSpinBox {{ background: {C_BG2}; border: 1px solid {C_BORDER};
-                                  border-radius: 6px; padding: 5px 8px; }}
+QComboBox, QLineEdit, QSpinBox {{ background: {C_CARD}; border: 1px solid {C_BORDER2};
+                                  border-radius: 6px; padding: 5px 8px; color: {C_TEXT}; }}
 QComboBox::drop-down {{ border: none; }}
-QCheckBox {{ background: transparent; }}
-QFrame#Card {{ background: {C_BG2}; border: 1px solid {C_BORDER}; border-radius: 10px; }}
-QLabel#Metric {{ font-size: 24px; font-weight: 700; color: {C_PRIMARY}; }}
-QLabel#MetricLabel {{ color: {C_MUTED}; font-size: 12px; }}
-QStatusBar {{ background: {C_BG2}; color: {C_MUTED}; }}
+QComboBox QAbstractItemView {{ background: {C_CARD}; color: {C_TEXT};
+                               selection-background-color: {C_PRIMARY}; }}
+QCheckBox {{ background: transparent; color: {C_TEXT}; spacing: 4px; }}
+QRadioButton {{ background: transparent; color: {C_TEXT}; spacing: 4px; }}
+QFrame#Card {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 10px; }}
+QFrame#Popover {{ background: {C_CARD}; border: 1px solid {C_BORDER2}; border-radius: 10px; }}
+QPushButton#CollapsibleHead {{ background: {C_PANEL}; border: 1px solid {C_BORDER};
+                               border-radius: 8px; text-align: left; padding: 8px 12px;
+                               font-weight: 600; color: {C_TEXT}; }}
+QPushButton#CollapsibleHead:checked {{ border-color: {C_PRIMARY}; color: {C_PRIMARY}; }}
+QStatusBar {{ background: {C_PANEL}; color: {C_MUTED}; }}
 """
 
 
@@ -144,7 +167,7 @@ def _thumb_label(path: str, w: int = 240, h: int = 160) -> QLabel:
     lb = QLabel()
     lb.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lb.setFixedSize(w, h)
-    lb.setStyleSheet(f"background:{C_BG2};border:1px solid {C_BORDER};border-radius:8px;")
+    lb.setStyleSheet(f"background:{C_CARD};border:1px solid {C_BORDER};border-radius:8px;")
     tp = loader.make_thumbnail(path, size=max(w, h))
     if tp:
         pix = QPixmap(tp)
@@ -178,6 +201,8 @@ def _badge(p: dict) -> str:
         tags.append("推荐")
     if p.get("is_candidate"):
         tags.append("候选")
+    if p.get("is_similar_loser") and not p.get("is_waste"):
+        tags.append("近似重复")
     if p.get("is_waste"):
         tags.append("废:" + (p.get("waste_reasons") or ""))
     return " ".join(tags) if tags else "—"
@@ -200,6 +225,274 @@ class MetricCard(QFrame):
         l.setObjectName("MetricLabel")
         lay.addWidget(v)
         lay.addWidget(l)
+
+
+# ---------------------------------------------------------------------------
+# 评分可解释性 & 公共小组件
+# ---------------------------------------------------------------------------
+def _is_closed_eye(p: dict) -> bool:
+    """闭眼判定：融合废片原因 / EAR 阈值 / 闭眼分类器概率，口径与引擎一致。"""
+    reasons = p.get("waste_reasons") or ""
+    if "闭眼" in reasons:
+        return True
+    ear = p.get("eye_open")
+    if ear is not None and ear < config.EAR_CLOSED_THRESHOLD:
+        return True
+    ep = p.get("eye_close_prob")
+    if ep is not None and ep > config.EYE_MODEL_CONF:
+        return True
+    return False
+
+
+def _clarity_pct(p: dict) -> int:
+    """清晰度百分比：拉普拉斯方差 200 视为满分（与 scorer.norm_blur 同口径）。"""
+    b = p.get("blur_score") or 0
+    return max(0, min(100, int(b / 200.0 * 100)))
+
+
+def score_breakdown(p: dict) -> list:
+    """返回 [(维度, 展示值, 等级, 说明), ...]，等级: good/warn/bad/muted。"""
+    rows = []
+    b = p.get("blur_score")
+    if b is None:
+        rows.append(("清晰度", "—", "muted", "无数据"))
+    else:
+        pct = _clarity_pct(p)
+        if b < 60:
+            lvl, desc = "bad", "严重失焦"
+        elif b < 120:
+            lvl, desc = "warn", "轻微失焦"
+        else:
+            lvl, desc = "good", "清晰锐利"
+        rows.append(("清晰度", f"{pct}/100", lvl, desc))
+
+    over = (p.get("over_ratio") or 0) * 100
+    under = (p.get("under_ratio") or 0) * 100
+    if over > 50 or under > 50:
+        lvl, desc = "bad", "严重过曝/欠曝"
+    elif over > 20 or under > 20:
+        lvl, desc = "warn", "曝光略偏"
+    else:
+        lvl, desc = "good", "曝光正常"
+    parts = []
+    if over > 1:
+        parts.append(f"过曝 {over:.0f}%")
+    if under > 1:
+        parts.append(f"欠曝 {under:.0f}%")
+    rows.append(("曝光", " · ".join(parts) if parts else "正常", lvl, desc))
+
+    a = p.get("aesthetic")
+    if a is None:
+        rows.append(("美学", "—", "muted", "无数据"))
+    else:
+        lvl = "good" if a >= 60 else ("warn" if a >= 40 else "bad")
+        rows.append(("美学", f"{a:.0f}/100", lvl, "构图/色彩观感"))
+
+    if p.get("is_face"):
+        if _is_closed_eye(p):
+            rows.append(("人脸", "闭眼 ⚠", "bad", f"EAR {p.get('eye_open') or 0:.2f}，建议排除"))
+        else:
+            rows.append(("人脸", "睁眼 OK", "good", f"EAR {p.get('eye_open') or 0:.2f}"))
+    else:
+        rows.append(("人脸", "未检测到", "muted", "无人脸"))
+
+    rows.append(("场景", f"{p.get('scene','—')} ({(p.get('scene_conf') or 0):.0%})",
+                 "muted", "AI 自动识别"))
+    comp = p.get("comp_score")
+    if comp is None:
+        rows.append(("综合", "—", "muted", "无数据"))
+    else:
+        lvl = "good" if comp >= 70 else ("warn" if comp >= 50 else "bad")
+        rows.append(("综合", f"{comp:.0f}/100", lvl, "加权总分"))
+
+    if p.get("is_similar_loser") and not p.get("is_waste"):
+        rows.append(("相似", "本组落败", "warn", "近重复，可找回"))
+    return rows
+
+
+_LEVEL_COLOR = {"good": C_OK, "warn": C_WARN, "bad": C_DANGER, "muted": C_MUTED}
+
+
+def explain_html(p: dict) -> str:
+    """富文本（用于 tooltip）。"""
+    rows = "".join(
+        f'<tr><td style="color:{C_MUTED};padding:2px 6px;">{name}</td>'
+        f'<td style="color:{_LEVEL_COLOR[lvl]};font-weight:600;padding:2px 6px;">{val}</td>'
+        f'<td style="color:{C_TEXT};padding:2px 6px;">{desc}</td></tr>'
+        for name, val, lvl, desc in score_breakdown(p))
+    return (f'<div style="font-size:12px;">'
+            f'<div style="font-weight:700;margin-bottom:4px;">'
+            f'{os.path.basename(p.get("path","") or "")}</div>'
+            f'<table>{rows}</table></div>')
+
+
+def face_badges(p: dict) -> list:
+    """返回 [(文本, 背景色, 前景色), ...]，用于人脸/闭眼/相似落败标记。
+
+    说明：引擎仅持久化 is_face(0/1)、eye_open(EAR)、eye_close_prob，
+    未保存人脸数量，因此多脸只以「人脸」徽章表示，无法显示具体数量。"""
+    out = []
+    if p.get("is_face"):
+        if _is_closed_eye(p):
+            out.append(("闭眼", C_DANGER, "#FFFFFF"))
+        else:
+            out.append(("人脸", C_PRIMARY, "#FFFFFF"))
+    if p.get("is_similar_loser") and not p.get("is_waste"):
+        out.append(("近似重复", C_WARN, "#FFFFFF"))
+    return out
+
+
+def _chip(text: str, bg: str, fg: str) -> QLabel:
+    lb = QLabel(text)
+    lb.setStyleSheet(
+        f"background:{bg};color:{fg};border-radius:6px;padding:1px 7px;"
+        f"font-size:11px;font-weight:600;")
+    return lb
+
+
+class ScorePopover(QFrame):
+    """点击「评分说明」弹出的可解释评分面板（Popup，点击外部自动关闭）。"""
+
+    def __init__(self, p: dict, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setObjectName("Popover")
+        self.setMinimumWidth(300)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+        title = QLabel("评分说明 · " + os.path.basename(p.get("path", "") or ""))
+        title.setObjectName("PopTitle")
+        lay.addWidget(title)
+        for name, val, lvl, desc in score_breakdown(p):
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            n = QLabel(name)
+            n.setFixedWidth(48)
+            n.setStyleSheet(f"color:{C_MUTED};")
+            v = QLabel(val)
+            v.setFixedWidth(100)
+            v.setStyleSheet(f"color:{_LEVEL_COLOR[lvl]};font-weight:600;")
+            d = QLabel(desc)
+            d.setStyleSheet(f"color:{C_TEXT};")
+            row.addWidget(n)
+            row.addWidget(v)
+            row.addWidget(d, 1)
+            lay.addLayout(row)
+        self.adjustSize()
+
+
+class Collapsible(QWidget):
+    """可折叠分组：标题栏可点击展开/收起，默认收起。"""
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.head = QPushButton("▸ " + title)
+        self.head.setObjectName("CollapsibleHead")
+        self.head.setCheckable(True)
+        self.head.setChecked(False)
+        self.body = QWidget()
+        self.body_lay = QVBoxLayout(self.body)
+        self.body_lay.setContentsMargins(4, 8, 4, 4)
+        self.body_lay.setSpacing(8)
+        self.body.setVisible(False)
+        self.head.toggled.connect(self._on_toggle)
+        lay.addWidget(self.head)
+        lay.addWidget(self.body)
+
+    def _on_toggle(self, checked: bool):
+        self.head.setText(("▾ " if checked else "▸ ") + self.head.text()[2:])
+        self.body.setVisible(checked)
+
+    def addWidget(self, w):
+        self.body_lay.addWidget(w)
+
+    def clear_body(self):
+        while self.body_lay.count():
+            it = self.body_lay.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+
+
+class CompareDialog(QDialog):
+    """A/B 双图对比：左右并排展示缩略图与评分维度拆解。"""
+
+    def __init__(self, db_path: str, members: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("A/B 对比")
+        self.resize(920, 580)
+        self.db_path = db_path
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+        pick = QHBoxLayout()
+        self.a_cb = QComboBox()
+        self.b_cb = QComboBox()
+        for m in members:
+            self.a_cb.addItem(os.path.basename(m["path"]), m["path"])
+            self.b_cb.addItem(os.path.basename(m["path"]), m["path"])
+        if self.a_cb.count() > 1:
+            self.b_cb.setCurrentIndex(1)
+        pick.addWidget(QLabel("A:"))
+        pick.addWidget(self.a_cb, 1)
+        pick.addWidget(QLabel("B:"))
+        pick.addWidget(self.b_cb, 1)
+        btn = QPushButton("对比")
+        btn.setObjectName("Primary")
+        btn.clicked.connect(self._render)
+        pick.addWidget(btn)
+        lay.addLayout(pick)
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.host = QWidget()
+        self.hl = QHBoxLayout(self.host)
+        self.hl.setSpacing(16)
+        self.area.setWidget(self.host)
+        lay.addWidget(self.area, 1)
+        if members:
+            self._render()
+
+    def _render(self):
+        pa = self.a_cb.currentData()
+        pb = self.b_cb.currentData()
+        if not pa or not pb:
+            return
+        with PhotoStore(self.db_path) as s:
+            ra = s.get_photo(pa)
+            rb = s.get_photo(pb)
+        self._clear()
+        for p, tag in ((ra, "A"), (rb, "B")):
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            t = QLabel(f"{tag} · {os.path.basename(p.get('path', ''))}")
+            t.setObjectName("SectionTitle")
+            col.addWidget(t)
+            col.addWidget(_thumb_label(p.get("path", ""), 380, 260))
+            for name, val, lvl, desc in score_breakdown(p):
+                row = QHBoxLayout()
+                n = QLabel(name)
+                n.setFixedWidth(48)
+                n.setStyleSheet(f"color:{C_MUTED};")
+                v = QLabel(val)
+                v.setFixedWidth(100)
+                v.setStyleSheet(f"color:{_LEVEL_COLOR[lvl]};font-weight:600;")
+                d = QLabel(desc)
+                row.addWidget(n)
+                row.addWidget(v)
+                row.addWidget(d, 1)
+                col.addLayout(row)
+            self.hl.addLayout(col)
+
+    def _clear(self):
+        while self.hl.count():
+            it = self.hl.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +659,7 @@ class ReviewPage(QWidget):
         self.cands = []
         self.undo_stack = []
         self.overview_rows = []
+        self._popover = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 14, 20, 14)
@@ -376,8 +670,8 @@ class ReviewPage(QWidget):
         t.setObjectName("PageTitle")
         self.summary_lb = QLabel("")
         self.summary_lb.setStyleSheet(
-            f"background:rgba(82,196,26,0.12);border:1px solid {C_OK};"
-            f"border-radius:8px;padding:6px 10px;color:#a8d8a0;")
+            f"background:{C_OK_SOFT};border:1px solid {C_OK};"
+            f"border-radius:8px;padding:6px 10px;color:#1f7a3d;")
         top.addWidget(t)
         top.addWidget(self.summary_lb, 1)
         root.addLayout(top)
@@ -412,6 +706,11 @@ class ReviewPage(QWidget):
         self.prog_lb = QLabel("")
         self.prog_lb.setObjectName("SectionTitle")
         lay.addWidget(self.prog_lb)
+        self.group_ctx_lb = QLabel("")
+        self.group_ctx_lb.setStyleSheet(
+            f"background:{C_PANEL};border:1px solid {C_BORDER};border-radius:8px;"
+            f"padding:5px 10px;color:{C_TEXT};")
+        lay.addWidget(self.group_ctx_lb)
         self.compare_area = QScrollArea()
         self.compare_area.setWidgetResizable(True)
         self.compare_host = QWidget()
@@ -424,7 +723,7 @@ class ReviewPage(QWidget):
         lay.addWidget(fs_title)
         self.film_area = QScrollArea()
         self.film_area.setWidgetResizable(False)
-        self.film_area.setFixedHeight(130)
+        self.film_area.setFixedHeight(150)
         self.film_host = QWidget()
         self.film_lay = QHBoxLayout(self.film_host)
         self.film_lay.setContentsMargins(2, 2, 2, 2)
@@ -432,23 +731,35 @@ class ReviewPage(QWidget):
         self.film_area.setWidget(self.film_host)
         lay.addWidget(self.film_area)
 
-        kb = QLabel("快捷键：0-5 标星 · P 保留 / X 排除 · A/B/C/D 选候选 · ←/→ 上一组/下一组 · Esc 退出")
-        kb.setStyleSheet(f"background:rgba(139,200,234,0.08);border:1px solid rgba(139,200,234,0.25);"
-                         f"border-radius:8px;padding:6px 10px;color:{C_MUTED};")
+        legend = ("快捷键：0-5 标星 · P 保留 / X 排除 · A/B/C/D 选候选 · "
+                  "←/→ 或 Tab 切换组 · Esc 退出复核　|　"
+                  "悬停缩略图看评分，点「评分说明」看维度拆解")
+        kb = QLabel(legend)
+        kb.setStyleSheet(f"background:{C_PRIMARY_SOFT};border:1px solid {C_PRIMARY};"
+                         f"border-radius:8px;padding:6px 10px;color:{C_TEXT};")
+        kb.setWordWrap(True)
         lay.addWidget(kb)
         btns = QHBoxLayout()
         b_prev = QPushButton("← 上一组")
         b_next = QPushButton("跳过 → 下一组")
         b_undo = QPushButton("↩ 撤销")
+        b_cmp = QPushButton("A/B 对比")
+        b_cmp.setObjectName("Ghost")
+        b_burst = QPushButton("本组仅留最佳帧")
+        b_burst.setObjectName("Danger")
         b_done = QPushButton("完成甄选 → 确认")
         b_done.setObjectName("Primary")
         b_prev.clicked.connect(lambda: self._step(-1))
         b_next.clicked.connect(lambda: self._step(1))
         b_undo.clicked.connect(self._undo)
+        b_cmp.clicked.connect(self._open_compare)
+        b_burst.clicked.connect(self._keep_only_best)
         b_done.clicked.connect(lambda: self.app.goto("export"))
         btns.addWidget(b_prev)
         btns.addWidget(b_next)
         btns.addWidget(b_undo)
+        btns.addWidget(b_cmp)
+        btns.addWidget(b_burst)
         btns.addStretch(1)
         btns.addWidget(b_done)
         lay.addLayout(btns)
@@ -467,6 +778,8 @@ class ReviewPage(QWidget):
         self.ov_waste = QCheckBox("显示废片")
         self.ov_waste.setChecked(True)
         self.ov_best = QCheckBox("仅推荐帧")
+        self.ov_losers = QCheckBox("显示落败近似帧")
+        self.ov_losers.setChecked(False)
         self.ov_sort = QComboBox()
         self.ov_sort.addItems(["综合分↓", "综合分↑", "拍摄时间↓", "拍摄时间↑", "星级↓", "文件名"])
         self.ov_search = QLineEdit()
@@ -477,6 +790,7 @@ class ReviewPage(QWidget):
         frow.addWidget(self.ov_star)
         frow.addWidget(self.ov_waste)
         frow.addWidget(self.ov_best)
+        frow.addWidget(self.ov_losers)
         frow.addWidget(QLabel("排序"))
         frow.addWidget(self.ov_sort)
         frow.addWidget(self.ov_search, 1)
@@ -488,6 +802,7 @@ class ReviewPage(QWidget):
                 pass
         self.ov_waste.toggled.connect(self._refresh_overview)
         self.ov_best.toggled.connect(self._refresh_overview)
+        self.ov_losers.toggled.connect(self._refresh_overview)
         self.ov_star.valueChanged.connect(self._refresh_overview)
         self.ov_search.textChanged.connect(self._refresh_overview)
 
@@ -500,6 +815,10 @@ class ReviewPage(QWidget):
         self.ov_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.ov_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         lay.addWidget(self.ov_table, 1)
+
+        # 近似重复落败帧：默认收起的可折叠组（可找回，不混在废片里）
+        self.losers_box = Collapsible("近似重复落败帧（近重复 · 可找回，默认收起）")
+        lay.addWidget(self.losers_box)
         return w
 
     # ---- 数据加载 ----
@@ -542,12 +861,27 @@ class ReviewPage(QWidget):
             w = it.widget()
             if w:
                 w.deleteLater()
+        if self._popover is not None:
+            self._popover.close()
+            self._popover = None
         if not self.groups:
             self.prog_lb.setText("🎉 没有需要人工甄选的组——所有相似组都已自动推荐最佳帧。")
+            self.group_ctx_lb.setText("")
             return
         self._load_group()
         g = self.groups[self.idx]
-        self.prog_lb.setText(f"待甄选组 {self.idx + 1}/{len(self.groups)} · 组 {g['id']} 共 {g.get('size', 0)} 张，候选 {len(self.cands)} 张")
+        self.prog_lb.setText(
+            f"待甄选组 {self.idx + 1}/{len(self.groups)} · 组 {g['id']} "
+            f"共 {g.get('size', 0)} 张，候选 {len(self.cands)} 张")
+        # 组上下文（连拍保护信息）
+        with PhotoStore(self.app.db_path) as s:
+            members = s.group_members(g["id"])
+            best = s.get_group(g["id"]).get("best_path")
+        kept = sum(1 for m in members
+                   if (m.get("star") or 0) >= 4 or m.get("label") == "P")
+        best_name = os.path.basename(best) if best else "（未推荐）"
+        self.group_ctx_lb.setText(
+            f"本组 {len(members)} 张　·　推荐最佳帧：{best_name}　·　已保留 {kept} 张")
         # 候选大图（每行最多 3 张）
         if self.cands:
             for r in range(0, len(self.cands), 3):
@@ -558,34 +892,56 @@ class ReviewPage(QWidget):
                     col = QVBoxLayout()
                     col.setSpacing(4)
                     tag = "ABCD"[i] if i < 4 else "·"
-                    col.addWidget(_thumb_label(c["path"], 300, 200))
-                    cap = QLabel(f"**{tag}** {_meta_line(c)} · {_badge(c)}")
+                    thumb = _thumb_label(c["path"], 300, 200)
+                    thumb.setToolTip(explain_html(c))
+                    col.addWidget(thumb)
+                    # 徽章行：候选标记 + 人脸/闭眼/近似重复
+                    chip_row = QHBoxLayout()
+                    chip_row.setSpacing(4)
+                    chip_row.addWidget(_chip(f"{tag} · 候选", C_PRIMARY, "#FFFFFF"))
+                    for (bt, bb, bf) in face_badges(c):
+                        chip_row.addWidget(_chip(bt, bb, bf))
+                    chip_row.addStretch(1)
+                    col.addLayout(chip_row)
+                    cap = QLabel(_meta_line(c) + "　" + _badge(c))
                     cap.setStyleSheet(f"color:{C_MUTED};font-size:12px;")
                     cap.setWordWrap(True)
                     col.addWidget(cap)
-                    pb = QPushButton(f"选此张（★5+P）")
+                    pb = QPushButton("选此张（★5+P）")
                     pb.clicked.connect(lambda _, x=i: self._pick_candidate(x))
                     col.addWidget(pb)
+                    info = QPushButton("ⓘ 评分说明")
+                    info.setObjectName("Ghost")
+                    info.clicked.connect(lambda _, ph=c["path"]: self._show_popover(ph, info))
+                    col.addWidget(info)
                     row_lay.addLayout(col)
                 self.compare_lay.addLayout(row_lay)
         else:
             self.compare_lay.addWidget(QLabel("该组没有可用候选。"))
         # 胶片条
-        with PhotoStore(self.app.db_path) as s:
-            members = s.group_members(g["id"])
         for m in members:
             card = QFrame()
             card.setFixedWidth(120)
-            card.setStyleSheet(f"background:{C_BG2};border:2px solid {_fs_color(m)};border-radius:8px;")
+            card.setStyleSheet(
+                f"background:{C_CARD};border:2px solid {_fs_color(m)};border-radius:8px;")
             cl = QVBoxLayout(card)
             cl.setContentsMargins(4, 4, 4, 4)
             cl.setSpacing(2)
-            cl.addWidget(_thumb_label(m["path"], 108, 72))
+            th = _thumb_label(m["path"], 108, 72)
+            th.setToolTip(explain_html(m))
+            cl.addWidget(th)
             fn = QLabel(os.path.basename(m["path"])[:16])
             fn.setStyleSheet(f"color:{C_MUTED};font-size:10px;")
             fn.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cl.addWidget(fn)
-            # 快捷按钮
+            bchips = face_badges(m)
+            if bchips:
+                br = QHBoxLayout()
+                br.setSpacing(2)
+                for (bt, bb, bf) in bchips:
+                    br.addWidget(_chip(bt, bb, bf))
+                br.addStretch(1)
+                cl.addLayout(br)
             brow = QHBoxLayout()
             bs = QPushButton("★")
             bs.setFixedHeight(22)
@@ -649,6 +1005,11 @@ class ReviewPage(QWidget):
         if self.stack.currentWidget() is not self.queue_page:
             super().keyPressEvent(e)
             return
+        # 在文本框/下拉框/数字框中打字时不触发快捷键
+        fw = self.focusWidget()
+        if isinstance(fw, (QLineEdit, QSpinBox, QComboBox)):
+            super().keyPressEvent(e)
+            return
         k = e.key()
         if Qt.Key.Key_0 <= k <= Qt.Key.Key_5:
             self._star_current(int(chr(k)))
@@ -669,7 +1030,7 @@ class ReviewPage(QWidget):
         elif k == Qt.Key.Key_Left:
             self._step(-1)
         elif k == Qt.Key.Key_Escape:
-            self.idx = -1
+            self.app.goto("import")   # 退出复核，回到导入
         else:
             super().keyPressEvent(e)
 
@@ -681,6 +1042,63 @@ class ReviewPage(QWidget):
         if self.cands:
             self._set_label(self.cands[0]["path"], label)
             self._step(1)
+
+    def _show_popover(self, path: str, btn: QPushButton):
+        """点击「评分说明」：弹出可解释评分面板（点击外部自动关闭）。"""
+        if self._popover is not None:
+            self._popover.close()
+            self._popover = None
+        with PhotoStore(self.app.db_path) as s:
+            p = s.get_photo(path)
+        if not p:
+            return
+        pop = ScorePopover(p)
+        pop.show()
+        pop.move(btn.mapToGlobal(btn.rect().bottomLeft()))
+        self._popover = pop
+
+    def _keep_only_best(self):
+        """连拍保护：仅保留组内推荐最佳帧，其余排除（需二次确认）。"""
+        if not self.groups:
+            return
+        g = self.groups[self.idx]
+        with PhotoStore(self.app.db_path) as s:
+            members = s.group_members(g["id"])
+            best = s.get_group(g["id"]).get("best_path")
+        if not best:
+            QMessageBox.information(self, "提示", "该组暂无推荐最佳帧，无法执行此操作。")
+            return
+        others = [m for m in members if m["path"] != best]
+        if not others:
+            QMessageBox.information(self, "提示", "该组仅最佳帧一张，无需操作。")
+            return
+        ans = QMessageBox.question(
+            self, "保护连拍",
+            f"本组共 {len(members)} 张，将排除其余 {len(others)} 张、仅保留最佳帧：\n"
+            f"{os.path.basename(best)}\n\n这些照片将被标记为「排除(X)」，"
+            f"可通过撤销或重新分析找回。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        with PhotoStore(self.app.db_path) as s:
+            for m in others:
+                s.set_pick(m["path"], "X")
+        self.app.status(f"已保留最佳帧，排除 {len(others)} 张连拍近似帧。")
+        self._show_queue()
+
+    def _open_compare(self):
+        """A/B 双图对比对话框。"""
+        if not self.groups:
+            QMessageBox.information(self, "提示", "当前没有可对比的组。")
+            return
+        g = self.groups[self.idx]
+        with PhotoStore(self.app.db_path) as s:
+            members = s.group_members(g["id"])
+        if len(members) < 2:
+            QMessageBox.information(self, "提示", "该组成员不足 2 张，无法对比。")
+            return
+        dlg = CompareDialog(self.app.db_path, members, self)
+        dlg.exec()
 
     # ---- 总览排行榜 ----
     def _refresh_overview(self):
@@ -695,15 +1113,21 @@ class ReviewPage(QWidget):
         sel_scene = self.ov_scene.currentText()
         star_min = self.ov_star.value()
         show_waste = self.ov_waste.isChecked()
+        show_losers = self.ov_losers.isChecked()
         only_best = self.ov_best.isChecked()
         search = self.ov_search.text().strip().lower()
+
+        def is_loser(p):
+            return bool(p.get("is_similar_loser")) and not p.get("is_waste")
 
         def keep(p):
             if sel_scene != "全部" and (p.get("scene") or "其他") != sel_scene:
                 return False
             if (p.get("star") or 0) < star_min:
                 return False
-            if not show_waste and p.get("is_waste"):
+            if p.get("is_waste") and not show_waste:
+                return False
+            if is_loser(p) and not show_losers:
                 return False
             if only_best and not p.get("is_best"):
                 return False
@@ -725,6 +1149,7 @@ class ReviewPage(QWidget):
         for r, p in enumerate(filtered):
             cell_thumb = QWidget()
             th = _thumb_label(p["path"], 110, 74)
+            th.setToolTip(explain_html(p))
             tl = QVBoxLayout(cell_thumb)
             tl.setContentsMargins(2, 2, 2, 2)
             tl.addWidget(th)
@@ -751,8 +1176,43 @@ class ReviewPage(QWidget):
             ol.addWidget(bs)
             ol.addWidget(bx)
             self.ov_table.setCellWidget(r, 6, op)
-        for c in range(7):
-            self.ov_table.resizeRowToContents(r) if filtered else None
+        if filtered:
+            self.ov_table.resizeRowsToContents()
+
+        # 近似重复落败帧：默认收起的可折叠组（可找回）
+        self.losers_box.clear_body()
+        losers = [p for p in photos if is_loser(p)]
+        if losers:
+            grid = QWidget()
+            gl = QGridLayout(grid)
+            gl.setSpacing(8)
+            cols = 6
+            for i, p in enumerate(losers):
+                cell = QWidget()
+                cl = QVBoxLayout(cell)
+                cl.setSpacing(3)
+                th = _thumb_label(p["path"], 150, 100)
+                th.setToolTip(explain_html(p))
+                cl.addWidget(th)
+                fn = QLabel(os.path.basename(p["path"])[:18])
+                fn.setStyleSheet(f"color:{C_MUTED};font-size:10px;")
+                fn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                cl.addWidget(fn)
+                row2 = QHBoxLayout()
+                bk = QPushButton("找回")
+                bk.setFixedHeight(22)
+                bk.clicked.connect(lambda _, pp=p["path"]: self._recover_loser(pp))
+                row2.addWidget(bk)
+                cl.addLayout(row2)
+                gl.addWidget(cell, i // cols, i % cols)
+            self.losers_box.addWidget(grid)
+
+    def _recover_loser(self, path: str):
+        """找回近似重复落败帧：标记保留，使其进入导出清单。"""
+        with PhotoStore(self.app.db_path) as s:
+            s.set_pick(path, "P")
+        self.app.status(f"已找回近似帧：{os.path.basename(path)}")
+        self._refresh_overview()
 
     def _set_scene(self, path: str, scene: str):
         with PhotoStore(self.app.db_path) as s:
@@ -795,6 +1255,9 @@ class ExportPage(QWidget):
         self.grid_lay = QGridLayout(self.grid_host)
         self.grid_area.setWidget(self.grid_host)
         lay.addWidget(self.grid_area, 1)
+
+        self.losers_box = Collapsible("近似重复落败帧（近重复 · 默认收起，可找回）")
+        lay.addWidget(self.losers_box)
 
         ex = QHBoxLayout()
         self.dir_edit = QLineEdit(os.path.join(config.DATA_DIR, "export"))
@@ -860,6 +1323,35 @@ class ExportPage(QWidget):
             self.grid_lay.addWidget(cell, i // cols, i % cols)
         self.grid_lay.setRowStretch((len(selected) - 1) // cols + 1, 1)
 
+        # 近似重复落败帧：默认收起的可折叠组，便于找回近重复
+        losers = [p for p in self.photos
+                  if p.get("is_similar_loser") and not p.get("is_waste")]
+        self.losers_box.clear_body()
+        if losers:
+            grid = QWidget()
+            gl = QGridLayout(grid)
+            gl.setSpacing(8)
+            cols = 4
+            for i, p in enumerate(losers):
+                cell = QWidget()
+                cl = QVBoxLayout(cell)
+                cl.setSpacing(3)
+                th = _thumb_label(p["path"], 150, 100)
+                th.setToolTip(explain_html(p))
+                cl.addWidget(th)
+                fn = QLabel(os.path.basename(p["path"])[:18])
+                fn.setStyleSheet(f"color:{C_MUTED};font-size:10px;")
+                fn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                cl.addWidget(fn)
+                row2 = QHBoxLayout()
+                bk = QPushButton("找回")
+                bk.setFixedHeight(22)
+                bk.clicked.connect(lambda _, pp=p["path"]: self._recover_export(pp))
+                row2.addWidget(bk)
+                cl.addLayout(row2)
+                gl.addWidget(cell, i // cols, i % cols)
+            self.losers_box.addWidget(grid)
+
     def _set_metric(self, card: MetricCard, label: str, value: str):
         # 直接更新内部 QLabel
         lay = card.layout()
@@ -870,6 +1362,12 @@ class ExportPage(QWidget):
         with PhotoStore(self.app.db_path) as s:
             s.set_star(path, 0)
             s.set_label(path, "")
+        self.reload()
+
+    def _recover_export(self, path: str):
+        """找回近似重复落败帧：标记保留，使其进入导出清单。"""
+        with PhotoStore(self.app.db_path) as s:
+            s.set_pick(path, "P")
         self.reload()
 
     def _browse_dir(self):
@@ -933,6 +1431,12 @@ class ExportPage(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # 加载浅色主题样式表；失败则回退到内联浅色 QSS
+        try:
+            with open(os.path.join(_HERE, "styles.qss"), encoding="utf-8") as _f:
+                self.setStyleSheet(_f.read())
+        except Exception:
+            self.setStyleSheet(FALLBACK_QSS)
         self.db_path = DEFAULT_DB
         self.setWindowTitle(APP_TITLE)
         self.resize(1280, 820)
@@ -945,6 +1449,7 @@ class MainWindow(QMainWindow):
 
         # 左导航
         self.nav = QListWidget()
+        self.nav.setObjectName("Nav")
         self.nav.setFixedWidth(170)
         for name in ["① 导入", "② 自动分析", "③ 人工复核", "④ 确认导出"]:
             it = QListWidgetItem(name)
@@ -1022,7 +1527,6 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setStyleSheet(DARK_QSS)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

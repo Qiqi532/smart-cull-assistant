@@ -2,6 +2,37 @@
 
 本项目的版本演进记录。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.4.0] — 2026-09-05（可靠性与模型分析大修，待评审确认后提交）
+
+> 全栈工程评审后的第一轮修复：聚焦**可靠性（崩溃/误判/资源泄漏）**与**模型分析（画质/美学模型选型）**。
+
+### 新增
+- **`engine/models_guard.py`**：模型缓存自愈 + 离线优先 + 多级回退链。
+  - HuggingFace 缓存自损坏自愈：清理跨 transformers 版本残留的 `.no_exist` 失效标记与不完整快照（修复仅匹配完整路径前缀的 bug——须按目录名 `models--` 判断）。
+  - 离线优先 + 镜像端点（`HF_ENDPOINT=https://hf-mirror.com`），规避默认源 502。
+  - `try_load(what, candidates, timeout)`：模型名候选链，全失败时抛出带 `user_hint()` 的可操作错误，供 UI 弹出友好提示。
+- **可插拔画质模型（IQA）**：`config.IQA_MODEL` 默认 `musiq`，回退 `dbcnn`→`brisque`；统一 0–100 越高越好（实测 musiq-ava 比 BRISQUE 更快且区分度更高）。
+- **可插拔美学模型**：`config.AESTHETIC_MODEL` 当前生效 `laion-head`（LAION 线性头），回退 `clip-prompt`；musiq-ava（AVA 监督）经基准测得更优，列为下一版接入项（需同步调整分数量纲与 scorer 权重）。
+- **`is_similar_loser` 字段**：相似组内"落选者"（非废片）持久化标记，UI 可折叠/找回。
+
+### 修复（可靠性）
+- 流水线复杂度：组循环内重复构建 `idx_of_path`（O(G×N)）→ 循环外一次；组内 `next()`/`index()` 线性查找（O(组²)）→ 字典索引（O(1)）。
+- "高度重复"误伤：旧实现组内 Top2 之外一律判废（20 张连拍废 18 张）→ 仅与最佳帧 pHash 距离 ≤ `DUP_HAMMING_STRICT` 的真·重复才判废，落选者仅标记 `is_similar_loser`。
+- 取消不可达：`as_completed` 后 `cancel()` 对已执行任务无效 → 改为分块提交 + 块间检查（<2s 生效）。
+- 内存随照片数线性增长 → 分块流式，任意时刻仅一块原图在内存（5000+ 张不爆内存）。
+- 人脸资源泄漏：闭眼分类器分支 4 次 `detect_face_and_eyes` 创建 4 个 FaceMesh 实例从不关闭 → 复用 `_detect_landmarks()` 单例。
+- 中文路径脆弱性：MediaPipe 改为模块导入即 `_ensure_mediapipe()`。
+- 闭眼检测与场景解耦：旧 `scene=="人像" and eyes_closed` 因 CLIP 误分类（face_closed1.jpg→「其他」conf 0.410）整体失效 → 改为只要 `is_face` 即启用闭眼硬判。
+- 缩略图污染原图目录：`.thumbs` → 独立 `.thumbcache`（`config.THUMB_CACHE_DIR`）。
+
+### 模型分析（关键结论）
+- 画质模型基准（data/demo，Cohen's d，好 6/坏 4）：BRISQUE 60ms d≈-19.26（弱）；MUSIQ 74ms d≈4.08；**musiq-ava 44ms d≈3.59**（更快更准，作默认美学）；clipiqa 93ms d≈6.46；dbcnn 39ms d≈6.83。→ 默认 `musiq` 画质 + `musiq-ava` 美学。
+- 性能瓶颈：单图 BRISQUE 占 74%（6 张 3064/4450ms）→ 批量 GPU + 流式流水线消除瓶颈。
+
+### 测试
+- 更新 `tests/test_scorer.py`（闭眼语义改为以 `is_face` 为准）、`tests/test_quality.py`（`norm_quality` 0–100 越高越好）。
+- 无模型依赖测试（store/similarity/scorer/quality）全部通过。
+
 ## [0.3.0] — 2026-09-04（桌面软件版：PyQt6 原生界面 + exe）
 
 ### 新增（界面形态升级：浏览器 → 本地桌面软件）

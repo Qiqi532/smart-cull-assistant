@@ -1,33 +1,17 @@
 # -*- coding: utf-8 -*-
-"""faces.py 单测：EAR + 分类器融合规则、边界区间触发逻辑（不跑真实模型）。"""
+"""faces.py 单测：EAR + 分类器融合规则、边界区间触发逻辑（不跑真实模型）。
+
+【v0.4 重构适配】detect_face_and_eyes 不再调用 detect_face_ear，而是直接复用
+_detect_landmarks() 单例结果并自行计算 EAR。因此单测改在更底层注入受控的
+关键点 / EAR，并打桩 _ensure_mediapipe 以脱离本机 mediapipe 可用性——聚焦验证
+"融合判定逻辑"本身，而非模型能否加载。
+"""
 from __future__ import annotations
 
 import numpy as np
 from PIL import Image
 
 import engine.faces as faces
-
-
-class _FakeMesh:
-    """伪造 mediapipe FaceMesh：返回 478 个伪关键点，触发分类器分支。"""
-
-    def __init__(self, **kw):
-        pass
-
-    def process(self, arr):
-        class LM:
-            x = 0.5
-            y = 0.3
-        class FLM:
-            landmark = [LM() for _ in range(478)]
-        class Res:
-            multi_face_landmarks = [FLM()]
-        return Res()
-
-
-def _fake_mesh(monkeypatch):
-    import mediapipe.python.solutions.face_mesh as _fm
-    monkeypatch.setattr(_fm, "FaceMesh", _FakeMesh)
 
 
 def _rgb():
@@ -38,14 +22,22 @@ def _pil():
     return Image.new("RGB", (32, 32), (100, 100, 100))
 
 
+def _patch(monkeypatch, ear_value):
+    """注入受控的融合管线输入：强制 mediapipe 可用、返回单张脸、EAR 可控。"""
+    monkeypatch.setattr(faces, "_ensure_mediapipe", lambda: True)
+    # 单张脸（478 个伪关键点）；_ear 已被打桩，坐标无所谓
+    monkeypatch.setattr(faces, "_detect_landmarks",
+                        lambda rgb: [[(0.5, 0.3) for _ in range(478)]])
+    monkeypatch.setattr(faces, "_ear", lambda pts: ear_value)
+
+
 def test_ear_open_above_hi_skips_classifier(monkeypatch):
     """明显睁眼（EAR 高于上界）时不应调用分类器。"""
     calls = {"n": 0}
-    monkeypatch.setattr(faces, "detect_face_ear", lambda rgb, thr: {
-        "is_face": True, "num_faces": 1, "ear": 0.5,
-        "eyes_closed": False, "error": None})
+    hi = faces.EYE_MODEL_EAR_HI
+    _patch(monkeypatch, hi + 0.1)
     monkeypatch.setattr(faces, "eye_close_probability",
-                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or 0.0)
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
     r = faces.detect_face_and_eyes(_rgb())
     assert calls["n"] == 0
     assert r["eye_close_prob"] is None
@@ -53,13 +45,12 @@ def test_ear_open_above_hi_skips_classifier(monkeypatch):
 
 
 def test_ear_closed_below_lo_skips_classifier(monkeypatch):
-    """明显闭眼（EAR 低于下界）直接判定闭眼，不跑分类器。"""
+    """明显闭眼（EAR 低于阈值）直接判定闭眼，不跑分类器。"""
     calls = {"n": 0}
-    monkeypatch.setattr(faces, "detect_face_ear", lambda rgb, thr: {
-        "is_face": True, "num_faces": 1, "ear": 0.05,
-        "eyes_closed": True, "error": None})
+    thr = faces.EAR_CLOSED_THRESHOLD
+    _patch(monkeypatch, thr - 0.05)
     monkeypatch.setattr(faces, "eye_close_probability",
-                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or 1.0)
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
     r = faces.detect_face_and_eyes(_rgb())
     assert calls["n"] == 0
     assert r["eyes_closed"] is True
@@ -68,10 +59,8 @@ def test_ear_closed_below_lo_skips_classifier(monkeypatch):
 def test_boundary_interval_triggers_classifier(monkeypatch):
     """EAR 落在边界区间才触发分类器，且分类器高置信度判闭眼。"""
     calls = {"n": 0}
-    _fake_mesh(monkeypatch)
-    monkeypatch.setattr(faces, "detect_face_ear", lambda rgb, thr: {
-        "is_face": True, "num_faces": 1, "ear": 0.25,   # 落在 [0.15, 0.33]
-        "eyes_closed": False, "error": None})
+    lo, hi, thr = faces.EYE_MODEL_EAR_LO, faces.EYE_MODEL_EAR_HI, faces.EAR_CLOSED_THRESHOLD
+    _patch(monkeypatch, (max(lo, thr) + hi) / 2.0)   # 保证在 [max(lo,thr), hi] 内
     monkeypatch.setattr(faces, "eye_close_probability",
                         lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or 0.9)
     r = faces.detect_face_and_eyes(_rgb(), pil_img=_pil())
@@ -82,10 +71,8 @@ def test_boundary_interval_triggers_classifier(monkeypatch):
 
 def test_boundary_interval_classifier_low_conf(monkeypatch):
     """边界区间分类器低置信度 → 不误判闭眼。"""
-    _fake_mesh(monkeypatch)
-    monkeypatch.setattr(faces, "detect_face_ear", lambda rgb, thr: {
-        "is_face": True, "num_faces": 1, "ear": 0.25,
-        "eyes_closed": False, "error": None})
+    lo, hi, thr = faces.EYE_MODEL_EAR_LO, faces.EYE_MODEL_EAR_HI, faces.EAR_CLOSED_THRESHOLD
+    _patch(monkeypatch, (max(lo, thr) + hi) / 2.0)
     monkeypatch.setattr(faces, "eye_close_probability", lambda *a, **k: 0.2)
     r = faces.detect_face_and_eyes(_rgb(), pil_img=_pil())
     assert r["eyes_closed"] is False

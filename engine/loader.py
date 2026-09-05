@@ -200,14 +200,18 @@ def make_thumbnail(path: str, size: int = config.THUMB_DEFAULT_SIZE,
                    thumb_dir: str | None = None) -> str | None:
     """生成并缓存缩略图，返回缩略图文件路径；失败返回 None。
 
-    缓存目录默认：<同目录>/.thumbs；缓存命中时直接复用，避免反复解码原图。
+    缓存目录默认：项目内 data/.thumbcache；缓存命中时直接复用，避免反复解码原图。
     缩略图以 文件绝对路径的 md5 作为文件名，规避中文路径问题。
+
+    【修复 v0.4】旧实现把 .thumbs 目录建在【照片所在目录】里。对摄影师这是不可
+    接受的副作用：会往珍贵的原始素材目录里塞隐藏文件夹，被 Lightroom/网盘/备份
+    工具扫到，甚至跟着一起同步上传。缩略图是程序自身的派生数据，必须待在项目内。
     """
     import hashlib
 
     try:
         if thumb_dir is None:
-            thumb_dir = os.path.join(os.path.dirname(path), config.THUMB_DIR_NAME)
+            thumb_dir = config.THUMB_CACHE_DIR
         os.makedirs(thumb_dir, exist_ok=True)
         digest = hashlib.md5(path.encode("utf-8", "surrogatepass")).hexdigest()
         thumb_path = os.path.join(thumb_dir, f"{digest}_{size}.jpg")

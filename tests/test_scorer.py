@@ -43,10 +43,15 @@ def test_waste_reasons_expo():
     assert "过曝/欠曝" in scorer.waste_reasons("其他", 200.0, 0.0, 0.9, False, False)
 
 
-def test_waste_reasons_eyes_only_portrait():
-    """闭眼只在人像场景判废。"""
-    assert "闭眼" in scorer.waste_reasons("人像", 200.0, 0.0, 0.0, True, False)
-    assert "闭眼" not in scorer.waste_reasons("风光", 200.0, 0.0, 0.0, True, False)
+def test_waste_reasons_eyes_decoupled_from_scene():
+    """闭眼判定已与场景分类解耦：只要确实检测到人脸(is_face)即判闭眼，
+    不再依赖场景是否被分类为人像（避免场景分类器走神导致闭眼检测整体失效）。"""
+    # 检测到人脸 → 人像场景下闭眼判定生效
+    assert "闭眼" in scorer.waste_reasons("人像", 200.0, 0.0, 0.0, True, False, is_face=True)
+    # 检测到人脸 → 非人像场景（如被误分类为"其他"）同样生效
+    assert "闭眼" in scorer.waste_reasons("其他", 200.0, 0.0, 0.0, True, False, is_face=True)
+    # 未检测到人脸 → 即便场景被标为人像也不判闭眼
+    assert "闭眼" not in scorer.waste_reasons("人像", 200.0, 0.0, 0.0, True, False, is_face=False)
 
 
 def test_waste_reasons_dup():

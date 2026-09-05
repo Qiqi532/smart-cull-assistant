@@ -53,12 +53,15 @@ def test_analyze_image_array_none():
     assert r["blur_score"] == 0.0
 
 
-def test_brisque_saturation_protection():
-    """BRISQUE ≥80 时应返回中性 0.5（防扁平插画误判为模糊）。"""
-    # norm_quality 的饱和保护在 scorer 中实现，这里验证阈值常量一致
+def test_norm_quality_higher_is_better():
+    """v0.4：画质分统一为 0-100【越高越好】，norm_quality 线性映射到 [0,1]，
+    不再对高分做"饱和中性化"补丁（模型为数据驱动，无此饱和问题）。"""
     from engine import scorer
-    assert scorer.BRISQUE_SATURATED == 80.0
-    assert scorer.norm_quality(90.0) == 0.5
+    # 缺失/无模型 → 中性 0.5（与旧版一致）
     assert scorer.norm_quality(None) == 0.5
-    # 正常范围内：分值越低质量越好
-    assert scorer.norm_quality(10.0) > scorer.norm_quality(40.0)
+    # 0-100 越高越好：90 分 ≈ 0.9；低分 < 高分
+    assert abs(scorer.norm_quality(90.0) - 0.9) < 1e-6
+    assert scorer.norm_quality(10.0) < scorer.norm_quality(40.0)
+    # 边界裁剪到 [0,1]
+    assert scorer.norm_quality(200.0) == 1.0
+    assert scorer.norm_quality(-50.0) == 0.0

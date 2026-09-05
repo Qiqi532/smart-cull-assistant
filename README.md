@@ -82,12 +82,43 @@ start.bat
 双击 exe 或运行脚本后直接弹出**原生桌面窗口**：选择照片文件夹（原生文件夹对话框）→ 点「开始分析」→ 自动进入复核/导出。
 
 ### 📦 打包成 exe（Windows 软件形态）
+
+> **关于「启动器 / PowerShell」的常见疑问**
+> `start.bat` 与旧版 `build_exe.bat` 产物（`光影选片助手.exe` = launcher 形态）**全程是纯 Windows BAT / cmd.exe，没有任何 PowerShell**（无 `Set-Location`/`Write-Host` 等 cmdlet）。
+> 旧版 exe 的"额外一层"并非 PowerShell，而是：它本质上是个**启动器**——双击后由 exe 再调起项目 `.venv\Scripts\python.exe app_qt.py` 子进程运行。也就是说它**必须和项目 `.venv` + 源码放在一起**才能用。若你讨厌的就是这层"必须带源码/.venv"的依赖，请看下方**方案 B（自包含 onedir 构建）**，那才是真正脱离源码、可直接分发的路径。
+
+#### 方案 A：开发态启动器（需 .venv，体积小、启动快）
 ```bash
-# 一键打包：生成 dist\光影选片助手.exe（约 8.5MB 启动器）
+# 1) 开发期一键启动（需已建 .venv 并完成依赖安装）
+start.bat
+
+# 2) 打包成"启动器" exe（约 8.5MB，仍需 .venv 在场）
 build_exe.bat
+#    产物 dist\光影选片助手.exe 复制到项目根目录（与 app_qt.py 同级）后双击即用
 ```
-- 把 `光影选片助手.exe` 复制到项目根目录（与 `app_qt.py` 同级）后，**双击即可启动**：直接弹出桌面原生窗口，无浏览器、无控制台黑窗。
-- 说明：exe 是「启动器」形态——复用项目 .venv 环境（torch/transformers 等大依赖不重复打包，避免 4GB+ 的单文件 exe 与 30s+ 的解压启动）。首次使用前需已按上文完成依赖安装。
+- exe 复用项目 `.venv`（torch/transformers 等大依赖不重复打包，避免 4GB+ 单文件与 30s+ 解压启动）；首次使用前需按上文完成依赖安装。
+
+#### 方案 B：自包含 onedir 构建（**无需 .venv，可直接分发**）★推荐分发
+把全部依赖（torch / transformers / PyQt6 / mediapipe / 等）一并打进一个文件夹，双击 `光影选片助手.exe` 即可运行，**不要求源码或 .venv 在场**：
+```bash
+# 一键打包自包含 onedir（首次约 3~8 分钟，体积较大）
+build_dist.bat
+# 可选：构建后额外生成 zip 压缩包
+set ZIP=1 & build_dist.bat
+```
+- 产物：`dist\光影选片助手\` 文件夹（含 `光影选片助手.exe` + 全部依赖）。**整个文件夹拷贝到任意 Windows 机器双击即用**，无需 Python、无需 `.venv`。
+- 模型权重（CLIP / 闭眼 ViT / MediaPipe）**不打包**，首次运行经 HF 镜像自动下载到 exe 目录下的 `.hf_cache` / `.torch_cache`（由 `dist_runtime_hook.py` 重定向，不落 C 盘）。
+- 对应规格：`光影选片助手_dist.spec`（入口直接是 `app_qt.py`，`hiddenimports`/`collect_submodules`/`collect_data_files` 已覆盖延迟导入的 torch/transformers/mediapipe 等）。
+
+#### 方案 C：制作安装包（单文件 setup.exe，含卸载）
+用 [Inno Setup](https://jrsoftware.org/isdl.php) 把方案 B 的 `dist\光影选片助手\` 封装为安装程序：
+```bash
+# 1) 先有方案 B 产物 dist\光影选片助手\
+# 2) 用 Inno Setup Compiler 打开 installer.iss 并编译（或命令行 ISCC.exe installer.iss）
+# 3) 产出 Output\光影选片助手_setup.exe
+```
+- 安装后提供**桌面快捷方式 + 开始菜单项 + 标准卸载**；卸载时默认清理 `.hf_cache`/`.torch_cache` 模型缓存（见 `installer.iss`）。
+- 提示：模型会下载进安装目录，建议安装到有写入权限的位置（默认 `Program Files` 下程序运行时会在安装目录写缓存；如受限可装到用户目录）。
 
 ### GPU 与降级说明
 - 有 CUDA GPU：CLIP / BRISQUE 自动用 GPU，速度最快；

@@ -138,13 +138,39 @@ def _ensure_mediapipe():
 _face_mesh = None
 _mesh = None   # 复用的 FaceMesh 实例（避免每张图重复初始化/加载模型）
 
+# 【修复 v0.4】旧实现把 ASCII 路径准备放在【首次 detect 调用时】才做。
+# 只要有任何代码在此之前 import 了 mediapipe（例如别处 `from mediapipe.python.solutions
+# import face_mesh`），mediapipe 就会按原始中文路径解析内置模型文件，随后稳定地报
+#   "The path does not exist: ...\mediapipe\modules\face_landmark\face_landmark_front_cpu.binarypb"
+# 实测可复现。改为【模块导入即完成准备】，彻底消除顺序依赖。
+_ensure_mediapipe()
+
 
 def _get_mesh():
-    """获取（并缓存）FaceMesh 实例。单线程流水线下复用安全。"""
+    """获取（并缓存）FaceMesh 实例。单线程流水线下复用安全。
+
+    【修复 v0.4】旧实现在 detect_face_and_eyes() 内部另起一行
+    `_fm.FaceMesh(...)` 新建实例且从不 close()，实测"调用 N 次 → 新建 N 个实例"。
+    每个实例都会重新加载一份 .binarypb 模型并占用未被回收的原生资源，
+    在连拍大批量人像上是持续的内存与耗时泄漏。全部改用本单例。
+    """
     global _mesh
     if _mesh is None:
         _mesh = _face_mesh.FaceMesh(static_image_mode=True, max_num_faces=5, refine_landmarks=False)
     return _mesh
+
+
+def _detect_landmarks(rgb: np.ndarray) -> list | None:
+    """复用单例跑一次 FaceMesh，返回全部人脸关键点列表（无人脸返回 None）。"""
+    if not _ensure_mediapipe():
+        return None
+    if rgb is None or rgb.size == 0:
+        return None
+    mesh = _get_mesh()
+    res = mesh.process(np.ascontiguousarray(rgb, dtype=np.uint8))
+    if not res.multi_face_landmarks:
+        return None
+    return [[(p.x, p.y) for p in lm.landmark] for lm in res.multi_face_landmarks]
 
 
 def _ear(pts) -> float:
@@ -174,20 +200,15 @@ def detect_face_ear(rgb: np.ndarray, ear_threshold: float = EAR_CLOSED_THRESHOLD
     if rgb is None or rgb.size == 0:
         return result
     try:
-        # FaceMesh 需要 RGB 输入（复用实例）
-        mesh = _get_mesh()
-        res = mesh.process(np.ascontiguousarray(rgb, dtype=np.uint8))
+        landmarks = _detect_landmarks(rgb)
     except Exception as e:
         result["error"] = f"FaceMesh 运行失败: {e}"
         return result
-    if not res.multi_face_landmarks:
+    if not landmarks:
         return result
     result["is_face"] = True
-    result["num_faces"] = len(res.multi_face_landmarks)
-    ears = []
-    for lm in res.multi_face_landmarks:
-        pts = [(p.x, p.y) for p in lm.landmark]
-        ears.append(_ear(pts))
+    result["num_faces"] = len(landmarks)
+    ears = [_ear(pts) for pts in landmarks]
     result["ear"] = min(ears) if ears else None
     result["eyes_closed"] = (result["ear"] is not None and result["ear"] < ear_threshold)
     return result
@@ -203,14 +224,28 @@ _eye_dev = None
 
 
 def _get_eye_classifier():
-    """懒加载闭眼 ViT 分类器（GPU 优先）。返回 (model, processor, device)。"""
+    """懒加载闭眼 ViT 分类器（GPU 优先）。返回 (model, processor, device)；不可用抛异常。
+
+    【修复 v0.4】加载前先做 HF 缓存自愈 + 缓存环境变量注入。
+    旧实现直接用模型名 from_pretrained，一旦本地缓存残缺（.no_exist 过期标记、
+    不完整快照）就抛异常，而异常被上层吞掉后仅写一行 warning——用户毫无感知，
+    实际却退化成了"只有 EAR"的单信号判定。
+    """
     global _eye_model, _eye_proc, _eye_dev
     if _eye_model is not None:
         return _eye_model, _eye_proc, _eye_dev
+    from . import models_guard
+
+    models_guard.apply_env()
+    models_guard.repair_hf_cache()
     import torch
     from transformers import AutoModelForImageClassification, AutoImageProcessor
-    _eye_proc = AutoImageProcessor.from_pretrained(EYE_MODEL_NAME)
-    _eye_model = AutoModelForImageClassification.from_pretrained(EYE_MODEL_NAME)
+
+    kwargs = {}
+    if models_guard.offline_local_files_only():
+        kwargs["local_files_only"] = True
+    _eye_proc = AutoImageProcessor.from_pretrained(EYE_MODEL_NAME, **kwargs)
+    _eye_model = AutoModelForImageClassification.from_pretrained(EYE_MODEL_NAME, **kwargs)
     _eye_dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _eye_model.to(_eye_dev).eval()
     return _eye_model, _eye_proc, _eye_dev
@@ -262,6 +297,14 @@ def detect_face_and_eyes(rgb: np.ndarray, pil_img=None,
       二者取“或”可互补。实测：睁眼样本两者均无误报。
     - 性能：仅当 EAR 处于 [EYE_MODEL_EAR_LO, EYE_MODEL_EAR_HI] 边界区间才跑 ViT 分类器，
       明显睁/闭眼直接由 EAR 判定（含人脸大批量更快）。
+
+    【修复 v0.4】两处缺陷：
+      1) 分类器分支里新建 FaceMesh 且不 close —— 每次都重新加载 .binarypb 模型，
+         原生资源持续泄漏。现改为复用 _detect_landmarks() 的单例结果，零额外推理。
+      2) 多人脸口径不一致 —— 综合 EAR 取【所有人脸的最小值】（最闭眼的那张脸），
+         但分类器却固定看 multi_face_landmarks[0]（第一张脸），两者可能不是同一张脸。
+         现改为对【EAR 最小的那张脸】跑分类器，与判定口径对齐。
+
     返回 dict：
         is_face, num_faces, ear,
         eye_close_prob 分类器最大闭眼概率（无脸/未触发/不可用为 None）
@@ -270,29 +313,37 @@ def detect_face_and_eyes(rgb: np.ndarray, pil_img=None,
     """
     result = {"is_face": False, "num_faces": 0, "ear": None,
               "eye_close_prob": None, "eyes_closed": False, "error": None}
-    base = detect_face_ear(rgb, ear_threshold)
-    result.update({k: v for k, v in base.items()})
-    if not result["is_face"]:
+    if not _ensure_mediapipe():
+        result["error"] = "mediapipe 不可用"
         return result
-    # EAR 已判闭眼 → 无需分类器
+    try:
+        landmarks = _detect_landmarks(rgb)
+    except Exception as e:
+        result["error"] = f"FaceMesh 运行失败: {e}"
+        return result
+    if not landmarks:
+        return result
+
+    result["is_face"] = True
+    result["num_faces"] = len(landmarks)
+    ears = [_ear(pts) for pts in landmarks]
+    result["ear"] = min(ears) if ears else None
+    result["eyes_closed"] = (result["ear"] is not None and result["ear"] < ear_threshold)
     if result["eyes_closed"]:
-        return result
-    # 仅边界区间（EAR 接近阈值）才用分类器增强，避免对明显睁眼做无用推理
+        return result                       # EAR 已判闭眼 → 无需分类器
+
     ear = result["ear"]
     if ear is None or not (EYE_MODEL_EAR_LO <= ear <= EYE_MODEL_EAR_HI):
+        return result                       # 明显睁眼 → 跳过分类器（省时）
+    if pil_img is None:
         return result
-    # 用分类器增强（需要 PIL 原图 + 关键点）
-    close_prob = None
-    if pil_img is not None:
-        try:
-            import mediapipe.python.solutions.face_mesh as _fm
-            mesh = _fm.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=False)
-            res = mesh.process(np.ascontiguousarray(rgb, dtype=np.uint8))
-            if res.multi_face_landmarks:
-                lm = [(p.x, p.y) for p in res.multi_face_landmarks[0].landmark]
-                close_prob = eye_close_probability(pil_img, lm)
-        except Exception as e:
-            _log.warning("闭眼分类裁剪失败：%s", e)
+    # 对"EAR 最小的那张脸"跑分类器，与上面的综合判定口径一致
+    try:
+        worst = landmarks[int(np.argmin(ears))] if ears else landmarks[0]
+        close_prob = eye_close_probability(pil_img, worst)
+    except Exception as e:
+        _log.warning("闭眼分类器运行失败（按仅 EAR）：%s", e)
+        close_prob = None
     result["eye_close_prob"] = close_prob
     if close_prob is not None and close_prob > model_conf:
         result["eyes_closed"] = True

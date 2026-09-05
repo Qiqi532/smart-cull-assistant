@@ -81,14 +81,23 @@ def phash_of_image(img) -> str | None:
         return None
 
 
-def _hamming_hex(a: str, b: str) -> int:
+def hamming_hex(a: str, b: str) -> int:
+    """两个十六进制 pHash 的汉明距离（不同位个数）。空值返回 255（视为极不相似）。"""
     if not a or not b:
         return 255
     return bin(int(a, 16) ^ int(b, 16)).count("1")
 
 
+# 兼容旧私有命名的调用方
+_hamming_hex = hamming_hex
+
+
 def _hamming_matrix(hexes: list[str]) -> np.ndarray:
-    """向量化计算两两汉明距离矩阵（分块控制内存）。"""
+    """向量化计算两两汉明距离矩阵。
+
+    ⚠️ 返回 n² 的矩阵，仅用于小批量（调试/单测）。生产路径请用
+    iter_similar_pairs()——它是流式生成器，内存占用恒定。
+    """
     n = len(hexes)
     mat = np.zeros((n, n), dtype=np.uint8)
     if n == 0:
@@ -98,10 +107,51 @@ def _hamming_matrix(hexes: list[str]) -> np.ndarray:
     for i0 in range(0, n, chunk):
         i1 = min(i0 + chunk, n)
         xor = vals[i0:i1][:, None] ^ vals[None, :]          # (chunk, n) uint64
-        # uint64 = 8 字节 = 64 位；unpackbits 展开为 (chunk, n*64)，再还原成 (chunk, n, 64)
-        bits = np.unpackbits(xor.view(np.uint8), axis=1)
-        mat[i0:i1] = bits.reshape(xor.shape[0], n, 64).sum(axis=2)
+        mat[i0:i1] = _popcount(xor)
     return mat
+
+
+def _popcount(xor: np.ndarray) -> np.ndarray:
+    """计算 uint64 数组中每个元素的置位数（汉明距离）。优先用 numpy 2.0 的
+    bitwise_count（无临时大数组），否则退回 unpackbits。"""
+    fn = getattr(np, "bitwise_count", None)
+    if fn is not None:
+        try:
+            return fn(xor).astype(np.uint8)
+        except Exception:
+            pass
+    # uint64 = 8 字节 = 64 位；unpackbits 展开为 (rows, n*64)，再还原成 (rows, n, 64)
+    bits = np.unpackbits(xor.view(np.uint8), axis=1)
+    return bits.reshape(xor.shape[0], xor.shape[1], 64).sum(axis=2).astype(np.uint8)
+
+
+def iter_similar_pairs(hexes: list[str], threshold: int, block: int = 256):
+    """流式产出所有汉明距离 < threshold 的 (i, j) 索引对（i < j）。
+
+    【修复 v0.4】旧实现先算完整 n×n 距离矩阵，再调 np.triu_indices(m, k=1)
+    生成全部上三角索引。两者的内存都是 O(n²)：
+        n=10_000  →  矩阵 100MB + 索引 2×5000万×8B ≈ 800MB
+        n=30_000  →  矩阵 900MB + 索引 ≈ 7.2GB  → 直接 MemoryError
+    改为分块扫描：每次只算 block×n 的一小块，内存占用 O(block × n)，
+    与照片总数无关。对典型相册（几百到几万张）都能稳定跑完。
+    """
+    n = len(hexes)
+    if n < 2:
+        return
+    vals = np.array([int(h, 16) if h else 0 for h in hexes], dtype=np.uint64)
+    for i0 in range(0, n, block):
+        i1 = min(i0 + block, n)
+        xor = vals[i0:i1][:, None] ^ vals[None, :]        # (block, n) uint64
+        dist = _popcount(xor)                             # (block, n) uint8
+        # 只保留 j > i 的上三角部分，避免重复对与自比
+        rows = np.arange(i0, i1)[:, None]
+        cols = np.arange(n)[None, :]
+        mask = (dist < threshold) & (cols > rows)
+        rr, cc = np.where(mask)
+        # rr 是块内行号（0 起），换算回全局索引需加 i0；cc 本身就是全局列号
+        for r, c in zip(rr.tolist(), cc.tolist()):
+            yield i0 + r, c
+
 
 
 # ---------------------------------------------------------------------------
@@ -154,14 +204,10 @@ def group_similar(paths: list[str], ts_list: list[float],
     valid_idx = [i for i, h in enumerate(phash_hexes) if h]
     m = len(valid_idx)
     if m >= 2:
-        # 只对有效哈希子集计算两两距离
+        # 只对有效哈希子集做流式配对（内存 O(block × m)，与规模无关）
         sub = [phash_hexes[i] for i in valid_idx]
-        mat = _hamming_matrix(sub)
-        # 上三角遍历合并
-        rows, cols = np.triu_indices(m, k=1)
-        for r, c in zip(rows, cols):
-            if mat[r, c] < phash_threshold:
-                uf.union(valid_idx[r], valid_idx[c])
+        for r, c in iter_similar_pairs(sub, phash_threshold):
+            uf.union(valid_idx[r], valid_idx[c])
 
     # ---- 3) 整理组 ----
     roots = uf.roots()

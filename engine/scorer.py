@@ -32,8 +32,13 @@ PRESETS = config.SCENE_PRESETS
 BLUR_WASTE = config.BLUR_WASTE          # 拉普拉斯方差 < 60 严重模糊
 EXPO_WASTE = config.EXPO_WASTE          # 过曝/欠曝占比 > 0.5 严重
 EAR_WASTE = config.EAR_WASTE            # 闭眼阈值（EAR）
-BRISQUE_WASTE = config.BRISQUE_WASTE    # BRISQUE > 50 严重失真（LIVE 训练模型，越低越好）
-BRISQUE_SATURATED = config.BRISQUE_SATURATED  # BRISQUE ≥80 饱和中性化保护
+BRISQUE_WASTE = config.BRISQUE_WASTE    # （遗留）BRISQUE 严重失真参考阈值
+BRISQUE_SATURATED = config.BRISQUE_SATURATED  # （遗留）BRISQUE 饱和保护
+# 【模型升级 v0.4】画质分来自可插拔模型（默认 musiq），统一为 0-100【越高越好】
+EAR_CLOSED_REF = config.EAR_CLOSED_REF  # EAR ≤ 此值 → face_n = 0
+EAR_OPEN_REF = config.EAR_OPEN_REF      # EAR ≥ 此值 → face_n = 1
+# 【修复 v0.4】闭眼硬判不再依赖场景分类结果（见 waste_reasons 注释）
+EYE_WASTE_REQUIRE_PORTRAIT = config.EYE_WASTE_REQUIRE_PORTRAIT_SCENE
 SCORE_GAP = config.SCORE_GAP            # Top1-Top2 综合分差阈值（<3 视为无明确胜者）
 SCENE_CONF_LOW = config.SCENE_CONF_LOW  # 场景置信度阈值
 DIM_GAP = config.DIM_GAP                # 维度冲突判定的差距阈值
@@ -55,17 +60,17 @@ def norm_blur(blur_score: float) -> float:
     return _clip(blur_score / 200.0)
 
 
-def norm_quality(brisque) -> float:
-    """BRISQUE 质量归一化：越低越好，0 分满分，100 分最低。
+def norm_quality(quality_score) -> float:
+    """画质分归一化：0-100【越高越好】→ [0, 1]。
 
-    【防误判保护】BRISQUE 在 ≥80 时高度怀疑为“非自然照片内容”（扁平插画/截图/极暗
-    高光裁剪等），此时模型不可信 → 返回中性 0.5，避免把清晰扁平图误判为“模糊”。
+    【v0.4 变更】旧版入参是 BRISQUE 失真分（越低越好），且需要一条
+    "≥80 就当没看见"的补丁来规避它对扁平插画/截图的饱和误报。
+    新版入参统一为 quality.iqa_score_* 的输出（0-100，越高越好，
+    默认模型 musiq 为数据驱动模型，不存在该饱和问题），因此无需补丁。
     """
-    if brisque is None:
+    if quality_score is None:
         return 0.5
-    if brisque >= BRISQUE_SATURATED:
-        return 0.5
-    return 1.0 - _clip(brisque / 100.0)
+    return _clip(float(quality_score) / 100.0)
 
 
 def norm_expo(over: float, under: float) -> float:
@@ -79,10 +84,20 @@ def norm_aes(aesthetic: float) -> float:
 
 
 def norm_face(ear, is_face: bool) -> float:
-    """人脸质量归一化：有脸时用 EAR（典型睁眼 ~0.30），无脸时取中性 0.5。"""
+    """人脸质量归一化：有脸时由 EAR 分段映射，无脸时取中性 0.5。
+
+    【修复 v0.4】旧实现为 clip(EAR / 0.35)，实测存在两处缺陷：
+      * 饱和：正常睁眼 EAR≈0.36 就打满 1.0，"睁得很开"与"勉强睁开"无法区分；
+      * 区分度不足：明确闭眼 EAR≈0.118 仍得 0.34 分，只比睁眼少 0.66。
+    改为 [EAR_CLOSED_REF, EAR_OPEN_REF] 线性区间 + 两端截断，
+    使"闭眼→0、正常睁眼→1"，中间态平滑过渡。
+    """
     if not is_face or ear is None:
         return FACE_NEUTRAL
-    return _clip(ear / 0.35)
+    span = EAR_OPEN_REF - EAR_CLOSED_REF
+    if span <= 0:                      # 配置异常时退回旧口径，避免除零
+        return _clip(float(ear) / 0.35)
+    return _clip((float(ear) - EAR_CLOSED_REF) / span)
 
 
 # ---------------------------------------------------------------------------
@@ -97,16 +112,20 @@ def composite(blur_n, expo_n, aes_n, face_n, scene="其他", weights=None) -> fl
 def analyze_photo_score(metrics: dict, scene: str = "其他", weights=None) -> dict:
     """由单张指标 dict 计算归一化子分与综合分。
 
-    metrics 字段：blur_score, over, under, aesthetic, ear, is_face[, brisque]
+    metrics 字段：blur_score, over, under, aesthetic, ear, is_face[, quality|brisque]
     返回 dict：blur_n, expo_n, aes_n, face_n, comp_score（并保留外部传入字段）
 
-    【模型升级 v2.2】清晰维度 = 0.5·拉普拉斯 + 0.5·BRISQUE 质量分（模型驱动的
-    质量信号，降低“平滑墙面被误判模糊”的纹理偏置）；brisque 缺失时退化为纯拉普拉斯。
+    【模型升级 v0.4】清晰维度 = 0.5·拉普拉斯 + 0.5·画质模型分（默认 musiq）。
+    拉普拉斯方差对"失焦/抖动"极敏感但会被平滑墙面误导，画质模型补上感知维度，
+    二者等权融合；模型缺失时退化为纯拉普拉斯。
+    兼容旧字段：DB 列名仍为 brisque，也接受新名 quality（优先）。
     """
     blur_n = norm_blur(metrics.get("blur_score", 0.0))
-    brisque = metrics.get("brisque")
-    if brisque is not None:
-        blur_n = 0.5 * blur_n + 0.5 * norm_quality(brisque)
+    q = metrics.get("quality")
+    if q is None:
+        q = metrics.get("brisque")
+    if q is not None:
+        blur_n = 0.5 * blur_n + 0.5 * norm_quality(q)
     expo_n = norm_expo(metrics.get("over", 0.0), metrics.get("under", 0.0))
     aes_n = norm_aes(metrics.get("aesthetic", 0.0))
     face_n = norm_face(metrics.get("ear"), bool(metrics.get("is_face", False)))
@@ -124,14 +143,24 @@ def analyze_photo_score(metrics: dict, scene: str = "其他", weights=None) -> d
 # 废片判定
 # ---------------------------------------------------------------------------
 def waste_reasons(scene: str, blur_score: float, over: float, under: float,
-                  eyes_closed: bool, dup: bool, brisque=None) -> list[str]:
+                  eyes_closed: bool, dup: bool, brisque=None,
+                  is_face: bool = False) -> list[str]:
     """返回废片原因列表；空列表表示非废片。
 
     eyes_closed: 融合判定结果（EAR<阈值 或 闭眼分类器>阈值）。
-    brisque:     仅供评分维度使用的模型质量分（0-100，越低越好）。此处不作为模糊
-                 判定的独立触发源——BRISQUE 对扁平插画/截图等非自然内容会饱和误报，
-                 故“模糊”废片仍以拉普拉斯方差为准，模型信号仅参与综合分（见
-                 analyze_photo_score）。
+    is_face:    是否真的检测到人脸（由 MediaPipe 给出）。
+    brisque:    仅供评分维度使用的画质模型分。不作为模糊废片的独立触发源——
+                模型分对构图/语义敏感，直接拿来判废片会误伤；"模糊"仍以
+                拉普拉斯方差为准，模型信号只参与综合分（见 analyze_photo_score）。
+    dup:        真·近乎像素重复（pHash 距离 ≤ config.DUP_HAMMING_STRICT）。
+                【修复 v0.4】旧实现把"组内排名落败者"也塞进这个参数，
+                导致 20 张连拍有 18 张被打成废片——那只是没赢，不是重复。
+
+    【修复 v0.4】闭眼硬判与场景分类解耦：
+        旧实现 `if scene == "人像" and eyes_closed`，而 scene 来自 CLIP 零样本
+        分类。实测 data/demo 中 face_closed1.jpg 被判为「其他」（置信度 0.410），
+        意味着只要场景分类器一走神，闭眼检测——本工具最核心的卖点——就整体失效。
+        改为：只要确实检测到人脸（is_face）就启用闭眼硬判。
     """
     reasons = []
     if blur_score < BLUR_WASTE:
@@ -140,20 +169,24 @@ def waste_reasons(scene: str, blur_score: float, over: float, under: float,
         reasons.append("过曝/欠曝")
     if dup:
         reasons.append("高度重复")
-    if scene == "人像" and eyes_closed:
-        reasons.append("闭眼")
+    if eyes_closed:
+        # 场景门控：默认关闭（只要检测到人脸即判闭眼），可由配置改回旧行为
+        if is_face or (EYE_WASTE_REQUIRE_PORTRAIT and scene == "人像"):
+            reasons.append("闭眼")
     return reasons
 
 
 def is_waste(scene: str, blur_score: float, over: float, under: float,
-             eyes_closed: bool, dup: bool, brisque=None) -> bool:
-    return len(waste_reasons(scene, blur_score, over, under, eyes_closed, dup, brisque)) > 0
+             eyes_closed: bool, dup: bool, brisque=None, is_face: bool = False) -> bool:
+    return len(waste_reasons(scene, blur_score, over, under, eyes_closed, dup,
+                             brisque, is_face)) > 0
 
 
 def is_hard_waste(scene: str, blur_score: float, over: float, under: float,
-                  eyes_closed: bool, brisque=None) -> bool:
+                  eyes_closed: bool, brisque=None, is_face: bool = False) -> bool:
     """硬性质量废片（不含'高度重复'，因为去重判定依赖组内 verdict）。"""
-    return len(waste_reasons(scene, blur_score, over, under, eyes_closed, dup=False, brisque=brisque)) > 0
+    return len(waste_reasons(scene, blur_score, over, under, eyes_closed, dup=False,
+                             brisque=brisque, is_face=is_face)) > 0
 
 
 # ---------------------------------------------------------------------------
