@@ -114,6 +114,27 @@ set ZIP=1 & build_dist.bat
 - `rawpy` 未安装时自动跳过 RAW 扩展名，不影响 JPEG/PNG 全流程；
 - 闭眼分类器（dima806）加载失败时自动退化为「仅 EAR」判定。
 
+### 🪶 轻量版（无 torch，推荐普通用户分发）
+
+标准版内嵌 torch / CLIP / MUSIQ（约 1.5GB），对多数用户偏重。**轻量版**把这些深度学习推理
+整体替换为纯 OpenCV 启发式（`engine/inference.py` 的 `HeuristicBackend`），画质/美学/场景
+用图像特征估算，无需下载任何模型权重、完全离线：
+
+```bash
+# 一键打包轻量版 onedir（首次约 1~3 分钟，产物约 150MB）
+build_dist_lightweight.bat
+# 可选：构建后额外生成 zip 压缩包
+set ZIP=1 & build_dist_lightweight.bat
+```
+- 产物：`dist_light\光影选片助手\` 文件夹（含 `光影选片助手.exe` + 依赖）。整体拷贝到任意
+  Windows 机器双击即用，**无任何联网/模型下载要求**，秒级启动。
+- 能力对比：模糊 / 曝光 / 重复去重 / 人脸·闭眼（MediaPipe）**与标准版一致**（这些本就不依赖 torch）；
+  画质分、美学分、场景分类改为 OpenCV 启发式，**精度低于深度学习模型**，由「人工复核」环节兜底。
+- 切换开关：`engine/config.py` 的 `INFERENCE_BACKEND`（或环境变量 `LUMINA_INFERENCE_BACKEND`），
+  可选 `torch`（标准，精度高）/ `heuristic`（轻量，离线）。轻量打包由
+  `dist_runtime_hook_light.py` 强制写入 `heuristic`，开发态默认仍为 `torch`。
+- 对应规格：`光影选片助手_dist_lightweight.spec`（排除 torch/transformers/pyiqa，保留 PyQt6/MediaPipe/opencv）。
+
 ### 模型缓存（不落 C 盘）
 首次运行从 HuggingFace Hub 自动下载 CLIP / 闭眼 ViT / MediaPipe 权重，缓存于项目内
 `.hf_cache` / `.torch_cache`（打包态由 `dist_runtime_hook.py` 重定向到 exe 旁；开发态默认落用户缓存目录）。离线可复用已缓存权重。

@@ -73,11 +73,16 @@ BRISQUE_WASTE_THRESHOLD = 50.0 # BRISQUE > 50 视为严重失真（仅作评分�
 IQA_MODEL = "musiq"                       # 首选画质模型（pyiqa 名）
 IQA_FALLBACKS = ["dbcnn", "brisque"]      # 依次降级；全部失败则退化为纯拉普拉斯
 
-# --- 【轻量化 Phase 0】推理后端选择（见 engine/inference.py）-------------------
+# --- 【轻量化 Phase 0/1】推理后端选择（见 engine/inference.py）-------------------
 # 把"需要 torch/transformers/pyiqa 的深度学习推理"从流水线里隔离出来。
-# 当前仅 torch 后端（沿用 quality.py / aesthetics.py）；未来新增 onnx 后端后，
-# 把这里改成 "onnx" 即可切换，pipeline / scorer 等业务代码无需改动。
-INFERENCE_BACKEND = "torch"
+#   "torch"      ：默认后端，沿用 quality.py(MUSIQ) / aesthetics.py(LAION 头+CLIP)，精度最高
+#   "heuristic"  ：轻量后端，纯 OpenCV + numpy 启发式，**无 torch / 无模型下载 / 完全离线**，
+#                  用于"轻量桌面版"分发（exe 去掉 torch 后约 150MB、秒级启动）；
+#                  画质/美学分精度低于深度学习模型，由人工复核环节兜底。
+# 切换后端只需改这一行（或轻量打包时用 runtime hook 注入），pipeline / scorer 等业务代码无需改动。
+# 注意：切换后端会令 ai_models 签名变化 → 已分析库自动全量重算（见 pipeline._ai_model_signature）。
+# 也可用环境变量 LUMINA_INFERENCE_BACKEND 覆盖（轻量打包的 runtime hook 即用它注入 "heuristic"）。
+INFERENCE_BACKEND = os.environ.get("LUMINA_INFERENCE_BACKEND", "torch")
 IQA_ANALYZE_SIZE = 512                    # 画质模型输入边长
 IQA_BATCH_SIZE = 8                        # 画质模型 GPU 批大小（0=逐张）
 # 各画质模型的原始量程，用于统一归一化为 0-100（越高越好）
