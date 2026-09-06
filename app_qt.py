@@ -1524,6 +1524,28 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+def _install_crash_logger():
+    """把未捕获异常写入 exe 旁的 crash.log（打包版无控制台，否则崩溃无迹可寻）。"""
+    import time
+    import traceback
+
+    def _hook(etype, val, tb):
+        try:
+            log = os.path.join(config.PROJECT_ROOT, "crash.log")
+            with open(log, "a", encoding="utf-8") as f:
+                f.write("\n===== %s =====\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+                traceback.print_exception(etype, val, tb, file=f)
+        finally:
+            sys.__excepthook__(etype, val, tb)
+
+    sys.excepthook = _hook
+
+
+# 模块加载阶段即安装崩溃日志，尽量早于运行期崩溃；
+# 打包态会更早由 dist_runtime_hook.py 安装（可捕获 import 阶段崩溃）。
+_install_crash_logger()
+
+
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

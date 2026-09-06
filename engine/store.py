@@ -365,12 +365,6 @@ class PhotoStore:
                 "SELECT scene, COUNT(*) n FROM photos GROUP BY scene")},
         }
 
-    def clear_all(self):
-        self.conn.execute("DELETE FROM photos")
-        self.conn.execute("DELETE FROM groups")
-        self.conn.commit()
-
-
 # ---------------------------------------------------------------------------
 # 命令行调试入口
 # ---------------------------------------------------------------------------

@@ -51,6 +51,9 @@ for _pkg in _real_third_party:
 import os as _os
 if _os.path.isdir('models'):
     datas.append(('models', 'models'))
+# 界面样式表：app_qt.py 从 _HERE（冻结态=_internal）读取 styles.qss
+if _os.path.isfile('styles.qss'):
+    datas.append(('styles.qss', '.'))
 
 # 兜底：显式列出关键顶层导入，确保 collect_submodules 漏网时仍被包含
 hiddenimports += [

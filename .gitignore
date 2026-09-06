@@ -9,10 +9,13 @@ __pycache__/
 .eggs/
 build/
 dist/
-pycache/          # start.bat 里 PYTHONPYCACHEPREFIX 的字节码缓存目录
+# PYTHONPYCACHEPREFIX 指向的字节码缓存目录
+# 注意：gitignore 不支持行内注释，注释必须单独成行，否则整行会被当成一个永不命中的 pattern
+pycache/
 
 # ---- 虚拟环境 / 缓存（不落仓库）----
 .venv/
+.venv-cpu/
 .pip_cache/
 .hf_cache/
 .torch_cache/
@@ -44,11 +47,15 @@ _srv_err.log
 .DS_Store
 Thumbs.db
 
-# ---- exe 打包产物（用 build_exe.bat 重新生成）----
+# ---- exe 打包产物（用 build_dist.bat 重新生成）----
 build/
+build-cpu/
 dist/
+dist-cpu/
 *.spec
 光影选片助手.exe
+# 打包态崩溃日志（_install_crash_logger 写到 exe 旁）
+crash.log
 
 # 例外：自包含打包规格是构建必需文件，随仓库分发
 !光影选片助手_dist.spec
