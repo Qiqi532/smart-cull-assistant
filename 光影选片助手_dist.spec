@@ -76,12 +76,20 @@ a = Analysis(
     runtime_hooks=['dist_runtime_hook.py'],  # 打包前重定向 HF/TORCH 缓存目录
     excludes=[
         # 这些包未被任何源码导入，排除以减小体积
-        'timm', 'sklearn', 'scipy',
-        'matplotlib', 'tensorboard', 'wandb',
+        'timm', 'sklearn', 'matplotlib', 'tensorboard', 'wandb',
         'torchaudio',
         # 环境中同时存在 PyQt5（conda 自带，mediapipe 间接依赖）与 PyQt6，
         # PyInstaller 禁止同时打包两个 Qt 绑定 —— 本应用只用 PyQt6
         'PyQt5', 'PySide2', 'PySide6', 'shiboken2', 'shiboken6',
+        # conda base 里的重型可选依赖：transformers/mediapipe 的 try-import 链
+        # 会被 PyInstaller 静态分析拖进包里（实测 tensorflow 1GB + 其余约 1GB），
+        # 运行时验证过全部不需要 —— 排除后瘦身约一半
+        'tensorflow', 'keras', 'panel', 'bokeh', 'holoviews', 'datashader',
+        'botocore', 'boto3', 's3transfer', 'jmespath',
+        'bitsandbytes', 'pyarrow', 'numba', 'llvmlite',
+        'pandas', 'h5py', 'jax', 'jaxlib', 'flax', 'dask', 'distributed',
+        'IPython', 'jupyter', 'notebook', 'ipykernel', 'streamlit',
+        'seaborn', 'plotly', 'sympy',
     ],
     noarchive=False,
     optimize=0,
