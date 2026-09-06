@@ -72,6 +72,12 @@ BRISQUE_WASTE_THRESHOLD = 50.0 # BRISQUE > 50 视为严重失真（仅作评分�
 #       结论：默认换 musiq（KonIQ 训练，真实照片失真感知），并按顺序自动降级。
 IQA_MODEL = "musiq"                       # 首选画质模型（pyiqa 名）
 IQA_FALLBACKS = ["dbcnn", "brisque"]      # 依次降级；全部失败则退化为纯拉普拉斯
+
+# --- 【轻量化 Phase 0】推理后端选择（见 engine/inference.py）-------------------
+# 把"需要 torch/transformers/pyiqa 的深度学习推理"从流水线里隔离出来。
+# 当前仅 torch 后端（沿用 quality.py / aesthetics.py）；未来新增 onnx 后端后，
+# 把这里改成 "onnx" 即可切换，pipeline / scorer 等业务代码无需改动。
+INFERENCE_BACKEND = "torch"
 IQA_ANALYZE_SIZE = 512                    # 画质模型输入边长
 IQA_BATCH_SIZE = 8                        # 画质模型 GPU 批大小（0=逐张）
 # 各画质模型的原始量程，用于统一归一化为 0-100（越高越好）

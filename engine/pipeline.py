@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from . import config, loader, quality, similarity, scorer
-from .aesthetics import analyze_batch, aesthetic_model_name
+from . import inference
 from .log import get_logger
 from .store import PhotoStore
 
@@ -63,8 +63,8 @@ CHUNK = max(QUALITY_WORKERS * 4, 8)
 
 def _ai_model_signature() -> str:
     """AI 模型签名（美学 + 画质 + 闭眼）。任一模型升级 → 签名变化 → 全量重算。"""
-    aes = aesthetic_model_name()
-    q = quality.quality_model_name()
+    aes = inference.aesthetic_model_name()
+    q = inference.quality_model_name()
     eye = _faces.eye_model_name() if _faces is not None else "none"
     return f"aes={aes}|q={q}|eye={eye}"
 
@@ -147,7 +147,7 @@ def _run_stage1(store: PhotoStore, metas: list[dict], idxs: list[int],
         qscores: dict[int, float | None] = {}
         if valid_pos:
             try:
-                vals = quality.iqa_score_batch([raw[k]["rgb"] for k in valid_pos])
+                vals = inference.quality_scores([raw[k]["rgb"] for k in valid_pos])
                 qscores = dict(zip(valid_pos, vals))
             except Exception as e:
                 _log.warning("画质模型批量推理失败，本块退化为纯拉普拉斯：%s", e)
@@ -334,7 +334,7 @@ def analyze_directory(root: str, db_path: str,
                         batch_imgs.append(im)
                         valid.append(i)
                 if valid:
-                    res = analyze_batch(batch_imgs)
+                    res = inference.scene_and_aesthetics(batch_imgs)
                     rows = []
                     for i, r in zip(valid, res):
                         clip_res[i] = r
@@ -564,8 +564,8 @@ def analyze_directory(root: str, db_path: str,
             "candidate_photos": n_candidate_photos,
             "waste": waste_count,
             "scene_dist": st.get("scenes", {}),
-            "aesthetic_model": aesthetic_model_name(),
-            "quality_model": quality.quality_model_name(),
+            "aesthetic_model": inference.aesthetic_model_name(),
+            "quality_model": inference.quality_model_name(),
             "eye_model": _faces.eye_model_name() if _faces is not None else "none",
             "elapsed": time.time() - t_start,
             "phase_timing": phase_t,
