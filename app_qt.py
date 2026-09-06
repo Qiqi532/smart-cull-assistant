@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-app_qt.py —— 光影选片助手（Smart Cull Assistant）桌面版（PyQt6）
+app_qt.py —— Lumina Select · 光影选片助手 桌面版（PyQt6）
 
 原生 Windows 桌面窗口（不依赖浏览器），四阶段向导：
     ① 导入 → ② 自动分析 → ③ 人工复核 → ④ 确认导出
@@ -44,9 +44,9 @@ from engine.store import PhotoStore  # noqa: E402
 try:
     from engine import __version__ as APP_VERSION
 except Exception:  # noqa: BLE001
-    APP_VERSION = "0.2.1"
+    APP_VERSION = "0.4.0"
 
-APP_TITLE = "光影选片助手"
+APP_TITLE = "Lumina Select · 光影选片助手"
 DEFAULT_DB = config.DEFAULT_DB
 DEMO_DIR = os.path.join(config.DATA_DIR, "demo")
 SCENE_OPTIONS = ["自动", "人像", "风光", "建筑", "街拍", "宠物", "静物", "其他"]

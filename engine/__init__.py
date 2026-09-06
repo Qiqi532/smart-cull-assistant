@@ -1,4 +1,4 @@
-# 光影选片助手（Smart Cull Assistant）核心引擎包
+# Lumina Select · 光影选片助手 核心引擎包
 # 纯 Python 实现，无 UI 依赖，可独立命令行调试；未来可直接迁移桌面端。
 """
 光影选片助手核心引擎（engine）

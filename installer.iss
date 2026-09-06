@@ -16,9 +16,9 @@
 ; =============================================================================
 
 #define MyAppName "光影选片助手"
-#define MyAppNameEn "Smart Cull Assistant"
+#define MyAppNameEn "Lumina Select"
 #define MyAppVersion "0.4.0"
-#define MyAppPublisher "光影选片助手 / Smart Cull Assistant"
+#define MyAppPublisher "Lumina Select / 光影选片助手"
 #define MyAppURL "https://github.com/"
 ; 自包含 onedir 产物目录（相对本 .iss 文件）
 #define MySourceDir "dist\光影选片助手"
