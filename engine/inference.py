@@ -16,7 +16,6 @@ pipeline.py 与 scorer.py 等业务代码完全不用动。
 """
 from __future__ import annotations
 
-import sys
 from typing import Protocol, runtime_checkable
 
 import cv2
@@ -60,7 +59,7 @@ class TorchBackend:
     def __init__(self):
         # 延迟 import：避免无 torch 环境 import 本模块即失败
         from . import quality as _quality
-        from .aesthetics import analyze_batch, aesthetic_model_name
+        from .aesthetics import aesthetic_model_name, analyze_batch
 
         self._quality = _quality
         self._analyze_batch = analyze_batch

@@ -43,7 +43,8 @@ def _install_crash_logger():
     def _hook(etype, val, tb):
         try:
             with open(os.path.join(_app, "crash.log"), "a", encoding="utf-8") as f:
-                f.write("\n===== %s =====\n" % _time.strftime("%Y-%m-%d %H:%M:%S"))
+                timestamp = _time.strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"\n===== {timestamp} =====\n")
                 _tb.print_exception(etype, val, tb, file=f)
         finally:
             sys.__excepthook__(etype, val, tb)

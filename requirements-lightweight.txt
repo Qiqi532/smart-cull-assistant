@@ -1,17 +1,13 @@
-# Torch standard edition dependencies.
-# For an NVIDIA GPU, install the matching CUDA build of torch/torchvision first;
-# pip keeps that compatible installation when the constraints below are met.
+# OpenCV lightweight edition: isolated, offline runtime and build/test tools.
+# Create with: python -m venv .venv-light
+# Install with: .\.venv-light\Scripts\python.exe -m pip install -r requirements-lightweight.txt
 
 numpy>=1.26,<2
 opencv-contrib-python>=4.8,<5
 Pillow>=10,<12
-torch>=2.4,<3
-torchvision>=0.19,<1
-transformers>=4.40,<6
 # 0.10.35 removed the legacy solutions/FaceMesh API used by engine.faces.
 mediapipe==0.10.21
 imagehash>=4.3,<5
-pyiqa>=0.1.16,<1
 PyQt6>=6.8,<6.9
 rawpy>=0.20,<1
 

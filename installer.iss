@@ -26,6 +26,7 @@
 
 [Setup]
 ; 基本信息
+AppId=LuminaSelect.Standard
 AppName={#MyAppName}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppVersion={#MyAppVersion}
@@ -37,18 +38,18 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 ; 单一安装包（非管理员也可装到用户目录；如需机器级安装去掉 PrivilegesRequired）
 PrivilegesRequired=lowest
-; 安装包标识（用于升级/卸载判定）
-SetupMutexAppId={#MyAppName}
+; AppId 用于区分标准版与轻量版的升级/卸载记录
 UninstallDisplayIcon={app}\光影选片助手.exe
 ; 输出
 OutputDir={#MyOutputDir}
 OutputBaseFilename={#MyAppName}_setup
 Compression=lzma2
 SolidCompression=yes
-; 64 位 Windows 优先
-ArchitecturesInstallIn64BitMode=x64
+; 本应用由 64 位 Python 构建，仅允许支持 x64 应用的 Windows
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 ; 允许在已安装目录写入模型缓存（程序运行时需要写 .hf_cache/.torch_cache）
-DirsExistsWarning=no
+DirExistsWarning=no
 DisableDirPage=auto
 
 [Languages]

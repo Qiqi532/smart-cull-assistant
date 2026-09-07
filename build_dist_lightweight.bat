@@ -4,7 +4,7 @@ rem ===========================================================================
 rem 光影选片助手 —— 轻量版（无 torch）自包含 onedir 打包
 rem
 rem 产物：dist_light\光影选片助手\ 文件夹（含 光影选片助手.exe + 依赖），
-rem        双击即可运行，约 150MB，完全离线、无需下载任何模型权重。
+rem        双击即可运行，完全离线、无需下载任何模型权重。
 rem
 rem 与 build_dist.bat（含 torch/CLIP/MUSIQ，约 1.5GB）的区别：
 rem   排除 torch/transformers/pyiqa，画质/美学/场景改走纯 OpenCV 启发式
@@ -15,9 +15,11 @@ rem ===========================================================================
 setlocal
 cd /d "%~dp0"
 
-set "PY=%~dp0.venv\Scripts\python.exe"
+set "PY=%~dp0.venv-light\Scripts\python.exe"
 if not exist "%PY%" (
-    echo [错误] 未找到 .venv，请先创建虚拟环境并安装依赖（见 README）。
+    echo [错误] 未找到 .venv-light，请先执行：
+    echo   python -m venv .venv-light
+    echo   .venv-light\Scripts\python.exe -m pip install -r requirements-lightweight.txt
     pause
     exit /b 1
 )
@@ -28,12 +30,18 @@ echo   光影选片助手 —— 轻量版（无 torch）自包含打包
 echo   解释器: %PY%
 echo   规格  : 光影选片助手_dist_lightweight.spec
 echo   说明  : 仅打包 PyQt6/MediaPipe/opencv/numpy 等，不打包 torch，
-echo          推理走 OpenCV 启发式，产物约 150MB、离线、秒级启动。
+echo          推理走 OpenCV 启发式，产物离线、秒级启动。
 echo ============================================================
 echo.
 
 echo 打包中（首次约 1~3 分钟）…
-"%PY%" -m PyInstaller --noconfirm --clean 光影选片助手_dist_lightweight.spec
+"%PY%" -m PyInstaller --noconfirm --clean --distpath dist_light --workpath build_light 光影选片助手_dist_lightweight.spec
+if errorlevel 1 (
+    echo.
+    echo [错误] PyInstaller 返回失败，请查看上方报错。
+    pause
+    exit /b 1
+)
 
 if not exist "%~dp0dist_light\光影选片助手\光影选片助手.exe" (
     echo.
@@ -60,5 +68,5 @@ if "%ZIP%"=="1" (
 )
 
 echo.
-echo 下一步（制作安装包，可选）：用 Inno Setup 编译 installer.iss
+echo 下一步（制作安装包，可选）：用 Inno Setup 编译 installer_lightweight.iss
 pause

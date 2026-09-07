@@ -1,17 +1,26 @@
 # -*- coding: utf-8 -*-
-"""faces.py 单测：EAR + 分类器融合规则、边界区间触发逻辑（不跑真实模型）。
+"""faces.py 单测：EAR + 分类器融合规则、边界区间触发逻辑。
 
 【v0.4 重构适配】detect_face_and_eyes 不再调用 detect_face_ear，而是直接复用
 _detect_landmarks() 单例结果并自行计算 EAR。因此单测改在更底层注入受控的
 关键点 / EAR，并打桩 _ensure_mediapipe 以脱离本机 mediapipe 可用性——聚焦验证
-"融合判定逻辑"本身，而非模型能否加载。
+"融合判定逻辑"本身；无脸用例额外验证本机 FaceMesh 能实际运行。
 """
 from __future__ import annotations
 
 import numpy as np
 from PIL import Image
 
-import engine.faces as faces
+from engine import faces
+
+
+def test_mediapipe_junction_path_is_environment_specific():
+    standard = faces._junction_path(r"D:\repo\.venv\Lib\site-packages")
+    lightweight = faces._junction_path(r"D:\repo\.venv-light\Lib\site-packages")
+
+    assert standard != lightweight
+    assert standard.isascii()
+    assert lightweight.isascii()
 
 
 def _rgb():
@@ -81,6 +90,7 @@ def test_boundary_interval_classifier_low_conf(monkeypatch):
 def test_no_face_neutral():
     """无脸时不判闭眼，eye_close_prob 为 None。"""
     r = faces.detect_face_and_eyes(_rgb())
+    assert r["error"] is None
     assert r["is_face"] is False
     assert r["eyes_closed"] is False
     assert r["eye_close_prob"] is None

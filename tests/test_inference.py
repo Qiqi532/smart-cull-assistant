@@ -4,6 +4,8 @@
 只验证"接缝"本身与空输入路径，不触发任何 AI 模型下载/推理，
 因此运行快、且不需要联网或 GPU。
 """
+import importlib.util
+
 import numpy as np
 import pytest
 
@@ -14,9 +16,9 @@ def test_backend_names_includes_torch():
     assert "torch" in inference.backend_names()
 
 
-def test_get_backend_default_is_torch():
+def test_get_backend_default_matches_config():
     backend = inference.get_backend()
-    assert backend.name == "torch"
+    assert backend.name == config.INFERENCE_BACKEND
 
 
 def test_get_backend_unknown_raises():
@@ -30,10 +32,12 @@ def test_empty_inputs_return_empty_lists():
     assert inference.scene_and_aesthetics([]) == []
 
 
+@pytest.mark.skipif(importlib.util.find_spec("torch") is None,
+                    reason="Torch backend is not installed in the lightweight environment")
 def test_quality_scores_delegates_to_torch_backend():
     # 单张合成图也应走通（torch 后端会真正加载画质模型并打分）
     img = np.zeros((64, 64, 3), dtype=np.uint8)
-    scores = inference.quality_scores([img])
+    scores = inference.get_backend("torch").quality_scores([img])
     assert isinstance(scores, list) and len(scores) == 1
     # 纯黑图模型分可能为 None 或数值；只断言类型安全
     assert scores[0] is None or isinstance(scores[0], float)

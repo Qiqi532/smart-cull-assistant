@@ -13,39 +13,17 @@
 # 用法：build_dist.bat   （内部执行  pyinstaller 光影选片助手_dist.spec）
 # =============================================================================
 
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_data_files
 
 # 入口脚本：直接打包桌面主程序（不再经 launcher 子进程）。
 # 注意：下方注释中的反斜杠仅为 Windows 路径示例说明。
 app_script = 'app_qt.py'
 
-# --- 真正被 app_qt.py / engine/* 导入的第三方包（由 grep 确认） -----------------
-# 这些包多在函数内延迟 import（torch / transformers / mediapipe / pyiqa 等），
-# 静态分析抓不到，必须显式 collect_submodules / collect_data_files 才能打全。
-_real_third_party = [
-    'torch', 'torchvision',          # 推理引擎（含 CUDA 时一并打包 GPU 版）
-    'transformers',                  # CLIP / ViT 闭眼分类器
-    'huggingface_hub',               # transformers 动态加载依赖
-    'safetensors',                   # transformers 动态加载依赖
-    'PyQt6',                         # 桌面原生界面
-    'mediapipe',                     # 人脸关键点 / 闭眼 EAR
-    'absl',                          # faces.py 顶层 from absl import logging
-    'PIL',                           # Pillow
-    'numpy',
-    'pyiqa',                         # 无参考画质模型（musiq / dbcnn / brisque）
-    'cv2',                           # opencv-python
-    'imagehash',                     # pHash 感知哈希
-]
-
-hiddenimports = []
-datas = []
-for _pkg in _real_third_party:
-    hiddenimports += collect_submodules(_pkg)
-    try:
-        datas += collect_data_files(_pkg)
-    except Exception:
-        # 个别包无 data 文件时忽略（不阻断打包）
-        pass
+# MediaPipe 仅保留本应用 FaceMesh 所需图与 TFLite 模型。
+datas = collect_data_files(
+    'mediapipe',
+    includes=['modules/face_landmark/**', 'modules/face_detection/**'],
+)
 
 # 随包分发的小权重模型（LAION 美学线性头约 3KB，只读，打进 _internal/models）
 import os as _os
@@ -55,18 +33,25 @@ if _os.path.isdir('models'):
 if _os.path.isfile('styles.qss'):
     datas.append(('styles.qss', '.'))
 
-# 兜底：显式列出关键顶层导入，确保 collect_submodules 漏网时仍被包含
-hiddenimports += [
+# 延迟加载与注册表驱动的模块需要显式列出；其依赖由 PyInstaller hook 解析。
+hiddenimports = [
     'torch', 'torchvision', 'transformers', 'huggingface_hub', 'safetensors',
-    'PyQt6', 'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets',
+    'transformers.models.clip.configuration_clip',
+    'transformers.models.clip.image_processing_clip',
+    'transformers.models.clip.modeling_clip',
+    'transformers.models.clip.processing_clip',
+    'transformers.models.clip.tokenization_clip',
+    'transformers.models.vit.configuration_vit',
+    'transformers.models.vit.image_processing_vit',
+    'transformers.models.vit.modeling_vit',
+    'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets',
     'mediapipe', 'mediapipe.python.solutions.face_mesh',
-    'absl', 'absl.logging',
-    'PIL', 'PIL.Image',
-    'numpy', 'pyiqa', 'cv2', 'imagehash',
+    'absl.logging', 'PIL.Image', 'cv2', 'imagehash',
+    'pyiqa',
+    'pyiqa.archs.musiq_arch',
+    'pyiqa.archs.dbcnn_arch',
+    'pyiqa.archs.brisque_arch',
 ]
-
-# 去重
-hiddenimports = sorted(set(hiddenimports))
 
 a = Analysis(
     [app_script],
@@ -92,6 +77,7 @@ a = Analysis(
         'bitsandbytes', 'pyarrow', 'numba', 'llvmlite',
         'pandas', 'h5py', 'jax', 'jaxlib', 'flax', 'dask', 'distributed',
         'IPython', 'jupyter', 'notebook', 'ipykernel', 'streamlit',
+        'pytest', 'sphinx', 'docutils',
         'seaborn', 'plotly', 'sympy',
     ],
     noarchive=False,

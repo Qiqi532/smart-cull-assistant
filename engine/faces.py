@@ -22,6 +22,7 @@ faces.py —— MediaPipe 人脸检测与闭眼判定（EAR）
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -79,10 +80,19 @@ def _create_junction(link: str, target: str) -> bool:
             ["cmd", "/c", "mklink", "/J", link, target],
             capture_output=True,  # 字节捕获，避免解码崩溃
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
         )
         return os.path.isdir(os.path.join(link, "mediapipe"))
     except Exception:
         return False
+
+
+def _junction_path(site_packages: str) -> str:
+    """Return a stable ASCII junction path unique to one Python environment."""
+    normalized = os.path.normcase(os.path.abspath(site_packages))
+    suffix = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    drive = os.path.splitdrive(normalized)[0] or "D:"
+    return os.path.join(drive + os.sep, f"photocull_mp_{suffix}")
 
 
 def _find_mediapipe_site_packages() -> list[str]:
@@ -118,8 +128,7 @@ def _ensure_mediapipe():
             mp_dir = os.path.join(sp, "mediapipe")
             if _is_ascii(mp_dir):
                 break  # 路径已 ASCII，直接正常 import
-            drive = os.path.splitdrive(sp)[0] or "D:"
-            link = os.path.join(drive + os.sep, "photocull_mp_link")
+            link = _junction_path(sp)
             if not os.path.isdir(os.path.join(link, "mediapipe")):
                 _create_junction(link, sp)
             if link not in sys.path:
@@ -239,7 +248,7 @@ def _get_eye_classifier():
     models_guard.apply_env()
     models_guard.repair_hf_cache()
     import torch
-    from transformers import AutoModelForImageClassification, AutoImageProcessor
+    from transformers import AutoImageProcessor, AutoModelForImageClassification
 
     kwargs = {}
     if models_guard.offline_local_files_only():
@@ -253,7 +262,6 @@ def _get_eye_classifier():
 
 def _crop_eye(pil_img, landmarks, pts_idx, pad: float = EYE_CROP_CONTEXT):
     """按眼睛关键点裁剪含上下文的方形区域，返回 PIL 图（已缩放到 224）。"""
-    from PIL import Image as _PILImage
     w, h = pil_img.size
     xs = [landmarks[i][0] * w for i in pts_idx]
     ys = [landmarks[i][1] * h for i in pts_idx]

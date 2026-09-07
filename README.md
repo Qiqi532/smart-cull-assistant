@@ -3,7 +3,7 @@
 本地 AI 智能选片工具：**废片剔除 → 相似分组 → 场景自适应评分 → 最佳帧推荐 → 不确定甄选**，一键导出保留片。
 照片全程本地处理、不上传；GUI 为 **PyQt6 桌面原生窗口**（无浏览器、无参数面板），算法核心在 `engine/`（纯 Python，可独立命令行调试）。
 
-**技术栈**：Python · PyTorch · OpenCLIP（场景分类 / 美学评分）· MUSIQ/BRISQUE 无参考画质评估（pyiqa）· MediaPipe（人脸 / 闭眼）· pHash 感知哈希聚类 · SQLite（WAL）· PyQt6 · PyInstaller 打包 exe / Inno Setup 安装包
+**双版本技术栈**：标准版使用 Python · PyTorch · OpenCLIP · MUSIQ/BRISQUE（pyiqa）；轻量版使用 OpenCV 启发式推理。两版共用 MediaPipe（人脸 / 闭眼）· pHash · SQLite（WAL）· PyQt6，并分别通过 PyInstaller / Inno Setup 独立打包。
 
 **关键指标**（RTX 4060 Laptop，1000 张实测）：全流程 63.9 s（验收 ≤5 min）；增量重分析 3.87 s；断点续跑、分块流式内存控制（5000+ 张不爆内存）；pytest 单测 + 端到端冒烟。
 
@@ -67,25 +67,30 @@ tests/                 pytest 单元测试 + 端到端冒烟
 - Windows / macOS / Linux，Python 3.10+（本项目在 Windows 11 + Python 3.12 验证）
 - **GPU 可选**：有 NVIDIA GPU（CUDA）更快；无 GPU 自动降级 CPU（慢但可用）
 
-### 安装
+### Torch 标准版：安装与运行
 ```bash
-# 1) 建虚拟环境（可选，推荐；本项目 .venv 复用 Anaconda base 以省 GPU torch 下载）
-python -m venv --system-site-packages .venv
-# 2) 安装依赖
+# 建议使用干净环境；如本机已有匹配 CUDA 的 torch，也可用 --system-site-packages 复用
+python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --cache-dir .pip_cache -r requirements.txt
-```
-
-### 运行
-```bash
-# 开发态（需先建 .venv 并装依赖，见上方「安装」）
 .\.venv\Scripts\python.exe app_qt.py
 ```
+
+NVIDIA 用户可先在 `.venv` 中安装与本机 CUDA 匹配的 Torch/TorchVision，再安装 `requirements.txt`；其中的版本范围不会替换已兼容的 GPU 构建。
+
+### OpenCV 轻量版：安装与运行
+```bash
+python -m venv .venv-light
+.\.venv-light\Scripts\python.exe -m pip install --cache-dir .pip_cache -r requirements-lightweight.txt
+set LUMINA_INFERENCE_BACKEND=heuristic
+.\.venv-light\Scripts\python.exe app_qt.py
+```
+
 双击 exe 或运行脚本后直接弹出**原生桌面窗口**：选择照片文件夹（原生文件夹对话框）→ 点「开始分析」→ 自动进入复核/导出。
 > 已打包的自包含 exe 见下方「打包成 exe · 方案 A」，双击 `dist\光影选片助手\光影选片助手.exe` 即用，无需 .venv。
 
 ### 📦 打包成 exe（Windows 软件形态）
 
-#### 方案 A：自包含 onedir 构建（**无需 .venv，可直接分发**）★推荐分发
+#### Torch 标准版：自包含 onedir 构建
 把全部依赖（torch / transformers / PyQt6 / mediapipe / 等）一并打进一个文件夹，双击 `光影选片助手.exe` 即可运行，**不要求源码或 .venv 在场**：
 ```bash
 # 一键打包自包含 onedir（首次约 3~8 分钟，体积较大）
@@ -95,9 +100,10 @@ set ZIP=1 & build_dist.bat
 ```
 - 产物：`dist\光影选片助手\` 文件夹（含 `光影选片助手.exe` + 全部依赖）。**整个文件夹拷贝到任意 Windows 机器双击即用**，无需 Python、无需 `.venv`。
 - 模型权重（CLIP / 闭眼 ViT / MediaPipe）**不打包**，首次运行经 HF 镜像自动下载到 exe 目录下的 `.hf_cache` / `.torch_cache`（由 `dist_runtime_hook.py` 重定向，不落 C 盘）。
-- 对应规格：`光影选片助手_dist.spec`（入口直接是 `app_qt.py`，`hiddenimports`/`collect_submodules`/`collect_data_files` 已覆盖延迟导入的 torch/transformers/mediapipe 等）。
+- 对应规格：`光影选片助手_dist.spec`（入口直接是 `app_qt.py`，显式保留 CLIP、ViT、MUSIQ、DBCNN、BRISQUE 与 FaceMesh 所需模块，不递归打包测试和无关模型族）。
+- **2026-09-07 本机实测**：干净 CPU Torch 环境构建约 5 分钟，onedir 产物 910.0 MiB / 6608 个文件；Inno Setup 安装包 228.4 MiB。
 
-#### 方案 B：制作安装包（单文件 setup.exe，含卸载）
+#### Torch 标准版：制作安装包（单文件 setup.exe，含卸载）
 用 [Inno Setup](https://jrsoftware.org/isdl.php) 把方案 A 的 `dist\光影选片助手\` 封装为安装程序：
 ```bash
 # 1) 先有方案 A 产物 dist\光影选片助手\
@@ -105,23 +111,28 @@ set ZIP=1 & build_dist.bat
 # 3) 产出 Output\光影选片助手_setup.exe
 ```
 - 安装后提供**桌面快捷方式 + 开始菜单项 + 标准卸载**；卸载时默认清理 `.hf_cache`/`.torch_cache` 模型缓存（见 `installer.iss`）。
-- 提示：模型会下载进安装目录，建议安装到有写入权限的位置（默认 `Program Files` 下程序运行时会在安装目录写缓存；如受限可装到用户目录）。
+- 提示：模型会下载进安装目录，建议安装到有写入权限的位置；当前安装器使用用户级安装权限。
 
 ### GPU 与降级说明
 - 有 CUDA GPU：CLIP / 画质模型自动用 GPU，速度最快；
 - 无 GPU / 驱动异常：自动回退 CPU，功能不变、仅更慢；
+- 本次本机构建的标准安装包使用 `torch 2.14.0+cpu`；如需发布 CUDA 版，请先按 PyTorch 官方方式在干净 `.venv` 中安装匹配驱动的 CUDA Torch，再执行 `build_dist.bat`；
 - `engine/aesthetics.py` 未找到 LAION 美学头时自动降级为「CLIP 提示词打分」；
 - `rawpy` 未安装时自动跳过 RAW 扩展名，不影响 JPEG/PNG 全流程；
 - 闭眼分类器（dima806）加载失败时自动退化为「仅 EAR」判定。
 
 ### 🪶 轻量版（无 torch，推荐普通用户分发）
 
-标准版内嵌 torch / CLIP / MUSIQ（约 1.5GB），对多数用户偏重。**轻量版**把这些深度学习推理
+标准版内嵌 torch / CLIP / MUSIQ，体积较大。**轻量版**把这些深度学习推理
 整体替换为纯 OpenCV 启发式（`engine/inference.py` 的 `HeuristicBackend`），画质/美学/场景
 用图像特征估算，无需下载任何模型权重、完全离线：
 
 ```bash
-# 一键打包轻量版 onedir（首次约 1~3 分钟，产物约 150MB）
+# 首次构建前创建独立环境（不得复用含 Torch 的 .venv）
+python -m venv .venv-light
+.\.venv-light\Scripts\python.exe -m pip install --cache-dir .pip_cache -r requirements-lightweight.txt
+
+# 一键打包轻量版 onedir
 build_dist_lightweight.bat
 # 可选：构建后额外生成 zip 压缩包
 set ZIP=1 & build_dist_lightweight.bat
@@ -134,6 +145,12 @@ set ZIP=1 & build_dist_lightweight.bat
   可选 `torch`（标准，精度高）/ `heuristic`（轻量，离线）。轻量打包由
   `dist_runtime_hook_light.py` 强制写入 `heuristic`，开发态默认仍为 `torch`。
 - 对应规格：`光影选片助手_dist_lightweight.spec`（排除 torch/transformers/pyiqa，保留 PyQt6/MediaPipe/opencv）。
+- 轻量安装包：用 Inno Setup 编译 `installer_lightweight.iss`，输出到 `Output_light\光影选片助手轻量版_setup.exe`；它与标准版 `installer.iss`、`Output\` 完全独立，可并存安装。
+- **2026-09-07 本机实测**：PyInstaller 6.22.2 最终构建约 97 秒，产物 411.1 MiB / 356 个文件；Inno Setup 安装包 103.4 MiB；
+  不含 torch、transformers、pyiqa、tensorflow、jax、pytest 或 Sphinx。体积主要来自
+  OpenCV-Contrib、MediaPipe FaceMesh、PyQt6 与 ImageHash 所需 SciPy。
+- 真实 MediaPipe 0.10.21 FaceMesh 已在独立 `.venv-light` 中文路径环境中验证；标准版与轻量版使用
+  各自的 ASCII junction，不会跨虚拟环境加载依赖。
 
 ### 模型缓存（不落 C 盘）
 首次运行从 HuggingFace Hub 自动下载 CLIP / 闭眼 ViT / MediaPipe 权重，缓存于项目内
@@ -157,7 +174,7 @@ python make_perf_data.py 1000
 ## ✅ 自动化测试
 
 ```bash
-# 单元测试（48 个：quality/similarity/faces/scorer/store/pipeline）
+# 常规测试（含 quality/similarity/faces/scorer/store/pipeline/发行契约）
 python -m pytest tests
 
 # 端到端冒烟（构造含连拍/模糊/过曝/清晰的图片集，跑通全链，较慢）

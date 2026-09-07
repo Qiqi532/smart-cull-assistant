@@ -16,6 +16,7 @@ pycache/
 # ---- 虚拟环境 / 缓存（不落仓库）----
 .venv/
 .venv-cpu/
+.venv-light/
 .pip_cache/
 .hf_cache/
 .torch_cache/
@@ -50,8 +51,12 @@ Thumbs.db
 # ---- exe 打包产物（用 build_dist.bat 重新生成）----
 build/
 build-cpu/
+build_light/
 dist/
 dist-cpu/
+dist_light/
+Output/
+Output_light/
 *.spec
 光影选片助手.exe
 # 打包态崩溃日志（_install_crash_logger 写到 exe 旁）
@@ -59,3 +64,4 @@ crash.log
 
 # 例外：自包含打包规格是构建必需文件，随仓库分发
 !光影选片助手_dist.spec
+!光影选片助手_dist_lightweight.spec
