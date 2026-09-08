@@ -44,6 +44,7 @@ _srv_err.log
 # ---- IDE / 系统 ----
 .idea/
 .vscode/
+.superpowers/
 *.swp
 .DS_Store
 Thumbs.db
